@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+sample/*.mp4
+*.egg-info/
+/tmp/spinread/
