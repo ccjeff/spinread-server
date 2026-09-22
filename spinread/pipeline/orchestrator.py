@@ -35,10 +35,16 @@ def _latest_stage_statuses(session: Session, pipeline_run_id: str) -> dict[str, 
     return latest
 
 
-def tick(session: Session, pipeline_run_id: str) -> None:
+def tick(
+    session: Session,
+    pipeline_run_id: str,
+    only_stages: set[str] | None = None,
+) -> None:
     """Enqueue newly-ready stages; roll up run/video state when terminal.
 
-    Caller owns the transaction.
+    Caller owns the transaction. When ``only_stages`` is given (correction /
+    partial rerun), only those stages are scheduled; dependencies outside the
+    set are treated as already satisfied and rollup covers only the subset.
     """
     run = session.get(PipelineRun, pipeline_run_id)
     if run is None or run.state != "RUNNING":
@@ -47,6 +53,9 @@ def tick(session: Session, pipeline_run_id: str) -> None:
     if video is None or video.deleted_at is not None:
         return
 
+    if only_stages is not None and run.scope != sorted(only_stages):
+        run.scope = sorted(only_stages)
+    consider: set[str] = set(run.scope) if run.scope else set(STAGES)
     statuses = _latest_stage_statuses(session, run.id)
 
     # Any retryable failure not yet re-queued keeps the run open; the queue
@@ -64,6 +73,8 @@ def tick(session: Session, pipeline_run_id: str) -> None:
 
     ready: list[str] = []
     for stage, needs in STAGES.items():
+        if stage not in consider:
+            continue
         if stage in statuses and statuses[stage].status in (
             TERMINAL | {"QUEUED", "RUNNING"}
         ):
@@ -71,7 +82,9 @@ def tick(session: Session, pipeline_run_id: str) -> None:
         if stage in open_job_stages:
             continue
         if all(
-            dep in statuses and statuses[dep].status in SATISFIED for dep in needs
+            dep not in consider
+            or (dep in statuses and statuses[dep].status in SATISFIED)
+            for dep in needs
         ):
             ready.append(stage)
 
@@ -99,9 +112,9 @@ def tick(session: Session, pipeline_run_id: str) -> None:
     if ready:
         return
 
-    # Nothing new to enqueue: if every stage is terminal, roll up.
-    all_statuses = [statuses[s].status for s in STAGES if s in statuses]
-    if len(all_statuses) < len(STAGES):
+    # Nothing new to enqueue: if every considered stage is terminal, roll up.
+    all_statuses = [statuses[s].status for s in consider if s in statuses]
+    if len(all_statuses) < len(consider):
         return  # some stage neither terminal nor queued yet (retry in flight)
     if not all(s in TERMINAL for s in all_statuses):
         return
@@ -135,5 +148,6 @@ def progress(session: Session, video_id: str) -> tuple[PipelineRun | None, dict[
         return None, {}, 0
     statuses = _latest_stage_statuses(session, run.id)
     n_terminal = sum(1 for sr in statuses.values() if sr.status in TERMINAL)
-    pct = round(n_terminal / len(STAGES) * 100)
+    total = len(run.scope) if run.scope else len(STAGES)
+    pct = round(n_terminal / total * 100)
     return run, statuses, pct

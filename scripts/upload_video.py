@@ -1,103 +1,88 @@
-"""Upload a video through the full SpinRead API flow (multipart presigned parts).
+#!/usr/bin/env python3
+"""Upload a video through the real API and wait for the pipeline.
 
-Usage:
-    python scripts/upload_video.py /path/to/video.mov \
-        [--api http://localhost:8000] [--email demo@spinread.local] \
-        [--password spinread-demo] [--session-type TRAINING|MATCH] \
-        [--target NEAR|FAR|LEFT|RIGHT] [--wait]
-
---wait polls processing-status until READY / PARTIAL_READY / failure.
+Usage: python scripts/upload_video.py sample/session.mp4 [--wait] [--base http://localhost:8000]
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
+import httpx
 
-def _req(method: str, url: str, token: str | None = None, body: dict | None = None) -> dict:
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req) as resp:  # noqa: S310 - dev tool, configurable URL
-        return json.loads(resp.read())
+TERMINAL = {"READY", "PARTIAL_READY", "PERMANENT_FAILURE", "RETRYABLE_FAILURE"}
 
 
-def _put_part(url: str, data: bytes) -> str:
-    req = urllib.request.Request(url, data=data, method="PUT")
-    with urllib.request.urlopen(req) as resp:  # noqa: S310
-        etag = resp.headers.get("ETag")
-    if not etag:
-        raise RuntimeError("part upload succeeded but no ETag in response")
-    return etag
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("video", type=Path)
+    parser.add_argument("--wait", action="store_true", help="poll processing-status until terminal")
+    parser.add_argument("--base", default="http://localhost:8000")
+    parser.add_argument("--email", default="demo@spinread.local")
+    parser.add_argument("--password", default="spinread-demo")
+    parser.add_argument("--timeout", type=int, default=600)
+    args = parser.parse_args()
 
+    video_path: Path = args.video
+    if not video_path.exists():
+        sys.exit(f"no such file: {video_path}")
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("video")
-    ap.add_argument("--api", default="http://localhost:8000")
-    ap.add_argument("--email", default="demo@spinread.local")
-    ap.add_argument("--password", default="spinread-demo")
-    ap.add_argument("--session-type", default="TRAINING", choices=["TRAINING", "MATCH"])
-    ap.add_argument("--target", default="NEAR", choices=["NEAR", "FAR", "LEFT", "RIGHT"])
-    ap.add_argument("--wait", action="store_true")
-    args = ap.parse_args()
+    client = httpx.Client(base_url=args.base, timeout=120)
+    login = client.post(
+        "/api/auth/login", json={"email": args.email, "password": args.password}
+    )
+    login.raise_for_status()
+    h = {"Authorization": f"Bearer {login.json()['access_token']}"}
 
-    path = Path(args.video)
-    size = path.stat().st_size
-    print(f"[upload] {path.name}: {size / 1e6:.1f} MB")
+    size = video_path.stat().st_size
+    resp = client.post(
+        "/api/video-uploads",
+        headers=h,
+        json={
+            "filename": video_path.name,
+            "byte_size": size,
+            "content_type": "video/mp4",
+            "session_type": "TRAINING",
+            "target_player": {"mode": "NEAR"},
+        },
+    )
+    resp.raise_for_status()
+    up = resp.json()
+    print(f"video_id={up['video_id']} upload_id={up['upload_id']} parts={len(up['parts'])}")
 
-    token = _req("POST", f"{args.api}/api/auth/login",
-                 body={"email": args.email, "password": args.password})["access_token"]
-    session = _req("POST", f"{args.api}/api/video-uploads", token, {
-        "filename": path.name,
-        "byte_size": size,
-        "content_type": "video/quicktime" if path.suffix.lower() == ".mov" else "video/mp4",
-        "session_type": args.session_type,
-        "target_player": {"mode": args.target},
-    })
-    parts_spec = session["parts"]
-    part_size = session["part_size"]
-    print(f"[upload] session {session['upload_id']}: {len(parts_spec)} parts "
-          f"x {part_size // 2**20} MiB")
+    data = video_path.read_bytes()
+    completed = []
+    with httpx.Client(timeout=600) as raw:
+        for part in up["parts"]:
+            n = part["part_number"]
+            chunk = data[(n - 1) * up["part_size"]: n * up["part_size"]]
+            put = raw.put(part["presigned_url"], content=chunk)
+            put.raise_for_status()
+            completed.append({"part_number": n, "etag": put.headers["ETag"].strip('"')})
+    resp = client.post(
+        f"/api/video-uploads/{up['upload_id']}/complete",
+        headers=h,
+        json={"parts": completed},
+    )
+    resp.raise_for_status()
+    print("complete:", resp.json())
 
-    t0 = time.time()
-    done_parts = []
-    with path.open("rb") as f:
-        for p in parts_spec:
-            n = p["part_number"]
-            f.seek((n - 1) * part_size)
-            etag = _put_part(p["presigned_url"], f.read(part_size))
-            done_parts.append({"part_number": n, "etag": etag})
-            pct = n / len(parts_spec) * 100
-            rate = n * part_size / max(time.time() - t0, 1e-9) / 1e6
-            print(f"[upload] part {n}/{len(parts_spec)} ({pct:.0f}%, {rate:.0f} MB/s)",
-                  flush=True)
-
-    res = _req("POST", f"{args.api}/api/video-uploads/{session['upload_id']}/complete",
-               token, {"parts": done_parts})
-    video_id = res["video_id"]
-    print(f"[upload] complete -> video_id={video_id} state={res['state']}")
-
-    if args.wait:
-        while True:
-            st = _req("GET", f"{args.api}/api/videos/{video_id}/processing-status", token)
-            print(f"[pipeline] {st['state']} {st['progress_pct']}%", flush=True)
-            if st["state"] in ("READY", "PARTIAL_READY") or "FAILURE" in st["state"]:
-                for s in st["stages"]:
-                    print(f"  {s['stage']:<10} {s['status']} attempt={s['attempt']}")
-                for lim in st["limitations"]:
-                    print(f"  limitation: {lim}")
-                return 0 if "FAILURE" not in st["state"] else 1
-            time.sleep(20)
-    return 0
+    if not args.wait:
+        return
+    deadline = time.time() + args.timeout
+    vid = up["video_id"]
+    while time.time() < deadline:
+        st = client.get(f"/api/videos/{vid}/processing-status", headers=h).json()
+        print(f"  state={st['state']} progress={st['progress_pct']}%", flush=True)
+        if st["state"] in TERMINAL:
+            print("final:", st["state"])
+            sys.exit(0 if st["state"] in ("READY", "PARTIAL_READY") else 1)
+        time.sleep(3)
+    sys.exit("timeout waiting for pipeline")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

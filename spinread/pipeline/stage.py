@@ -57,6 +57,39 @@ class StageContext:
     def load_artifact_json(self, artifact: Artifact) -> dict:
         return json.loads(self.s3.get_bytes(artifact.object_key).decode("utf-8"))
 
+    def active_original(self) -> "MediaAsset":
+        from spinread.core.models import MediaAsset
+
+        original = self.session.scalar(
+            select(MediaAsset).where(
+                MediaAsset.video_id == self.video.id,
+                MediaAsset.class_ == "ORIGINAL",
+                MediaAsset.status == "ACTIVE",
+            )
+        )
+        if original is None:
+            raise StageError("NO_ORIGINAL", "video has no ACTIVE ORIGINAL media asset")
+        return original
+
+    def ensure_original_local(self) -> tuple[Path, Path]:
+        """Download ORIGINAL to the stable cross-run cache path.
+
+        Returns (local_video_path, poc_work_dir). The work dir is shared by
+        POC caches keyed on content (pcm.npy, gray_frames.npy), so repeated
+        runs of ACTIVITY/RALLY on the same media skip the re-decode.
+        """
+        original = self.active_original()
+        cache_root = Path(self.settings.tmp_dir) / "cache" / original.content_hash
+        cache_root.mkdir(parents=True, exist_ok=True)
+        local = cache_root / "original"
+        if not local.exists():
+            tmp = cache_root / f".download-{self.stage_run.id}"
+            self.s3.download_file(original.object_key, str(tmp))
+            tmp.replace(local)  # atomic publish; concurrent downloads race safely
+        work = cache_root / "work"
+        work.mkdir(exist_ok=True)
+        return local, work
+
 
 @dataclass
 class StageResult:
@@ -94,10 +127,15 @@ def compute_idempotency_key(
 def gather_prior_artifacts(
     session: Session, pipeline_run_id: str
 ) -> dict[str, Artifact]:
-    """Latest artifact per stage produced by this pipeline run."""
+    """Latest artifact per stage referenced by this run's stage_runs.
+
+    Goes through stage_runs.output_artifact_id (not artifacts.pipeline_run_id)
+    so artifacts reused via content-hash dedupe are visible to later stages.
+    """
     rows = session.scalars(
         select(Artifact)
-        .where(Artifact.pipeline_run_id == pipeline_run_id)
+        .join(StageRun, StageRun.output_artifact_id == Artifact.id)
+        .where(StageRun.pipeline_run_id == pipeline_run_id)
         .order_by(Artifact.created_at)
     ).all()
     return {a.stage: a for a in rows}
@@ -218,34 +256,43 @@ def execute_stage(
     if result.artifact_name is not None and result.artifact_json is not None:
         payload = json.dumps(result.artifact_json, indent=1, sort_keys=True).encode("utf-8")
         digest = hashlib.sha256(payload).hexdigest()
-        owner_id = video.owner_id
-        tmp_key = analysis_key(
-            owner_id, video.id, pipeline_run.id, stage_impl.stage,
-            f"tmp/{stage_run.id}.json",
+        # artifacts.content_hash is globally UNIQUE (LLD §14.2 dedupe): when an
+        # identical artifact already exists (e.g. a rerun reproduces the same
+        # bytes), reference it instead of inserting a duplicate row.
+        existing_artifact = session.scalar(
+            select(Artifact).where(Artifact.content_hash == digest)
         )
-        final_key = analysis_key(
-            owner_id, video.id, pipeline_run.id, stage_impl.stage, result.artifact_name
-        )
-        s3.put_bytes(tmp_key, payload, content_type="application/json")
-        head = s3.head(tmp_key)
-        if head is None or int(head.get("ContentLength", -1)) != len(payload):
-            raise RetryableStageError("artifact tmp write could not be verified")
-        s3.copy(tmp_key, final_key)
-        s3.delete(tmp_key)
+        if existing_artifact is not None:
+            artifact_id = existing_artifact.id
+        else:
+            owner_id = video.owner_id
+            tmp_key = analysis_key(
+                owner_id, video.id, pipeline_run.id, stage_impl.stage,
+                f"tmp/{stage_run.id}.json",
+            )
+            final_key = analysis_key(
+                owner_id, video.id, pipeline_run.id, stage_impl.stage, result.artifact_name
+            )
+            s3.put_bytes(tmp_key, payload, content_type="application/json")
+            head = s3.head(tmp_key)
+            if head is None or int(head.get("ContentLength", -1)) != len(payload):
+                raise RetryableStageError("artifact tmp write could not be verified")
+            s3.copy(tmp_key, final_key)
+            s3.delete(tmp_key)
 
-        artifact = Artifact(
-            video_id=video.id,
-            pipeline_run_id=pipeline_run.id,
-            stage=stage_impl.stage,
-            stage_version=stage_impl.stage_version,
-            object_key=final_key,
-            content_hash=digest,
-            metrics=result.metrics,
-            limitations=result.limitations,
-        )
-        session.add(artifact)
-        session.flush()
-        artifact_id = artifact.id
+            artifact = Artifact(
+                video_id=video.id,
+                pipeline_run_id=pipeline_run.id,
+                stage=stage_impl.stage,
+                stage_version=stage_impl.stage_version,
+                object_key=final_key,
+                content_hash=digest,
+                metrics=result.metrics,
+                limitations=result.limitations,
+            )
+            session.add(artifact)
+            session.flush()
+            artifact_id = artifact.id
 
     stage_run.status = result.status
     stage_run.output_artifact_id = artifact_id

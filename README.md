@@ -14,9 +14,10 @@ SpinRead(乒乓球视频分析产品)的 MLP 后端,落地「上传 → 管线 �
 FastAPI(api 进程)                    Worker(认领循环,可内嵌 api 线程)
    │  /api/videos/*                     │  SKIP LOCKED 认领 → 执行 stage
    │  /api/video-uploads/*              ▼
-   │  /api/videos/{id}/stream/*    PROBE→NORMALIZE→QUALITY→ACTIVITY→TIMELINE
-   │  /api/videos/{id}/media/proxy      │  (DAG,spinread/pipeline/dag.py)
-   │  /api/videos/{id}/thumbs/*         ▼
+   │  /api/videos/{id}/stream/*    PROBE→NORMALIZE→QUALITY→ACTIVITY→RALLY→EVENTS
+   │  /api/videos/{id}/media/proxy   →TIMELINE→METRICS→REPORT
+   │  /api/videos/{id}/thumbs/*        │  (DAG v1.1.0,spinread/pipeline/dag.py)
+   │  时间线编辑 / 片段导出            ▼
    └─────────── 媒体网关(鉴权,S3 取字节,非预签名 GET)   artifacts→S3,时间线→PG
 ```
 
@@ -76,7 +77,15 @@ TOKEN=$(curl -s localhost:8000/api/auth/login -H 'Content-Type: application/json
 | GET | `/api/videos/{id}` | 详情(含 probe) |
 | DELETE | `/api/videos/{id}` | 软删(DELETED + assets PURGE_SCHEDULED) |
 | GET | `/api/videos/{id}/processing-status` | `{state, progress_pct, stages[], limitations[]}`(LLD §9) |
-| GET | `/api/videos/{id}/timelines/active` | 激活时间线 + items |
+| GET | `/api/videos/{id}/timelines/active` | 激活时间线 + items(层级:activity 段 → RALLY → HIT_CANDIDATE) |
+| GET | `/api/videos/{id}/timelines/{version}` | 任意版本时间线 |
+| POST | `/api/videos/{id}/timeline-edits` | 时间线编辑(HLD §8.6),base 版本冲突 → 409 |
+| POST | `/api/videos/{id}/pipeline-runs` | 手动全量重跑(MANUAL_RERUN);有 RUNNING run → 409 |
+| GET | `/api/videos/{id}/reports/active` | 当前 PUBLISHED 报告(指标快照 + findings) |
+| POST | `/api/clips` | 片段导出(幂等;异步 CLIP_RENDER,proxy 720p) |
+| GET | `/api/clips?video_id=` / `/api/clips/{id}` / `/api/clips/{id}/download` | 片段列表/状态/下载(video/mp4) |
+| POST | `/api/highlight-reels` | 多区间集锦(按给定顺序 concat) |
+| GET | `/api/highlight-reels/{id}` / `.../download` | 集锦状态/下载 |
 | GET | `/api/videos/{id}/stream/master.m3u8` | HLS 播放列表(段 URI 重写为网关路径) |
 | GET | `/api/videos/{id}/stream/{seg}.ts` | HLS 分片 |
 | GET | `/api/videos/{id}/media/proxy` | proxy.mp4,支持 Range(206) |
@@ -84,18 +93,47 @@ TOKEN=$(curl -s localhost:8000/api/auth/login -H 'Content-Type: application/json
 
 除 login/health 外全部需要 `Authorization: Bearer`;错误统一 `{error:{code,message,details?}}`。
 
+## 管线(DAG v1.1.0)
+
+```
+PROBE → NORMALIZE → QUALITY → ACTIVITY → RALLY → EVENTS → TIMELINE → METRICS → REPORT
+```
+
+- RALLY(`rally-heuristic-0.1.0`,POC):RALLY_LIKE 段内按击球间隔切回合;ACTIVITY/RALLY 共享稳定媒体缓存(`tmp_dir/cache/<original sha>/`,pcm.npy 跨 run 命中)
+- EVENTS(`event-flat-0.1.0`):每回合每拍一条 HIT_CANDIDATE(P0 无球员定位,actor=null)
+- TIMELINE(`timeline-build-0.2.0`):activity 段为顶层,RALLY 挂段下,HIT 挂回合下;RALLY/EVENTS artifact 缺失时退化为纯 ACTIVITY 层级
+- METRICS(`metrics-0.1.0`):有效时长、回合数/时长分布、每回合拍数、段类型分布、置信覆盖、correction_rate → `metric_values`
+- REPORT(`report-0.1.0`):指标快照 + 3 条 findings 规则(低置信占比>0.3 / 非回合时间占比>0.25 / >60s 超长回合);无 LLM
+
+## 时间线编辑(HLD §8.6)
+
+`POST /api/videos/{id}/timeline-edits`,body `{base_timeline_version, operations:[...]}`:
+
+- `UPDATE_BOUNDARY` / `SET_LABEL`(仅顶层段可改类型)/ `SPLIT`(子项按 at_ms 归边)/ `MERGE_NEXT`(同类型)/ `DELETE`(含子树)
+- 事务内校验(半开区间、顶层不重叠、范围合法,422),整版复制为新 version(created_by=USER),原子切 pointer
+- base 不符 → 409 `TIMELINE_VERSION_CONFLICT` + 当前版本;成功后自动开 CORRECTION run(只含 METRICS/REPORT)重算指标与报告
+
+## 片段导出(HLD §9.2–9.3)
+
+- `POST /api/clips`(单区间,pre_roll 800ms/post_roll 1200ms)/ `POST /api/highlight-reels`(多区间按序)
+- 幂等:`sha256(video_id|proxy hash|规范区间|preset)` 命中直接复用同一 clip_id
+- 渲染:worker `CLIP_RENDER` 用 POC `render_intervals` 从 **proxy(720p)** 精确重编码;后续可加 original 档
+- 状态:RENDERING → READY/FAILED;READY 后 `download_url` 网关下载
+
 ## 测试
 
 ```bash
-pytest -q        # 需要 compose 栈已起;test_queue 打真 PG,test_e2e 打真 PG+MinIO+ffmpeg
+pytest -q        # 需要 compose 栈已起;全部打真 PG+MinIO+ffmpeg
 ```
 
 ## 与完整 LLD 的裁剪说明
 
-- 只做到「上传 → 切片时间线」链路:DAG 裁为 PROBE→NORMALIZE→QUALITY→ACTIVITY→TIMELINE;无 rally/event 细化、报告、quiz、教练、consent 细化、指标/计划
+- DAG 为 9 阶段:无 LOCALIZATION/OUTCOME/ADJUDICATION(rally 切分直接由音频撞击间距驱动,HIT actor=null)
+- 报告为确定性指标 + 规则 findings,无 LLM 叙述;无基线对比/复测计划
+- 无 quiz、教练授权、consent 细化
 - 媒体下发走**鉴权媒体网关**(HLD §6.3 的备选方案),不发预签名 GET;上传仍用预签名 PUT 直传
 - HLS 单档 720p30(`scale=min(1280,iw)`),无多档自适应、无 contact sheet
 - QUALITY 仅基于 probe 元数据产 HLD §7.2 能力集(无 OpenCV 信号)
-- ACTIVITY 直接复用 POC `analyze_video`(activity-heuristic-0.1.0),metrics/limitations 原样入 artifact
-- 无审计表、无 Idempotency-Key 头机制、无游标分页、物理删除(CLEANUP)留桩未实现
+- ACTIVITY/RALLY 复用 POC 算法(`analyze_video`/`detect_rallies_for_video`),metrics/limitations 原样入 artifact
+- 导出只渲染 proxy 档;无审计表、无 Idempotency-Key 头机制、无游标分页、物理删除(CLEANUP)留桩未实现
 - MinIO 镜像用 `quay.io/minio/minio`(docker.io 在部分网络拉不到,二者同上游)

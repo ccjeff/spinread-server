@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 from spinread.api import deps
 from spinread.api.errors import ApiError, api_error_handler, error_body
-from spinread.api.routers import auth, media, uploads, videos
+from spinread.api.routers import auth, clips, media, reports, timelines, uploads, videos
 from spinread.config import get_settings
 from spinread.core.seed import seed_demo_user
 
@@ -43,6 +43,9 @@ app.include_router(auth.router)
 app.include_router(uploads.router)
 app.include_router(videos.router)
 app.include_router(media.router)
+app.include_router(timelines.router)
+app.include_router(reports.router)
+app.include_router(clips.router)
 
 
 @app.get("/api/health")

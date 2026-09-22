@@ -104,6 +104,7 @@ class ProcessingStatusOut(BaseModel):
 
 class TimelineItemOut(BaseModel):
     item_id: str
+    parent_id: str | None = None
     type: str
     start_ms: int
     end_ms: int

@@ -7,9 +7,7 @@ import logging
 
 from pingpong_training.media.probe import FFmpegError
 from pingpong_training.pipeline import analyze_video
-from sqlalchemy import select
 
-from spinread.core.models import MediaAsset
 from spinread.pipeline.stage import (
     RetryableStageError,
     StageContext,
@@ -25,23 +23,13 @@ class ActivityStage:
     stage_version = "activity-heuristic-0.1.0"
 
     def run(self, ctx: StageContext) -> StageResult:
-        original = ctx.session.scalar(
-            select(MediaAsset).where(
-                MediaAsset.video_id == ctx.video.id,
-                MediaAsset.class_ == "ORIGINAL",
-                MediaAsset.status == "ACTIVE",
-            )
-        )
-        if original is None:
-            raise StageError("NO_ORIGINAL", "video has no ACTIVE ORIGINAL media asset")
-
-        local = ctx.work_dir / "original_input"
-        ctx.s3.download_file(original.object_key, str(local))
+        # Stable cross-run cache: pcm/gray_frames npy caches hit across runs.
+        local, poc_work = ctx.ensure_original_local()
 
         try:
             artifact = analyze_video(
                 local,
-                work_dir=ctx.work_dir / "poc_cache",
+                work_dir=poc_work,
                 ffmpeg_bin=ctx.settings.ffmpeg_bin,
                 ffprobe_bin=ctx.settings.ffprobe_bin,
             )

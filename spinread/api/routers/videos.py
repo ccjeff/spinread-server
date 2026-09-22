@@ -86,6 +86,52 @@ def delete_video(
     return None
 
 
+@router.post("/{video_id}/pipeline-runs", status_code=201)
+def create_pipeline_run(
+    video_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Manual full rerun (LLD §14.3 manual retry). 409 when one is RUNNING."""
+    from spinread.core.models import MediaAsset, PipelineRun
+    from spinread.pipeline.dag import PIPELINE_VERSION
+    from spinread.pipeline import orchestrator
+    from spinread.api.errors import ApiError
+
+    video = get_owned_video(video_id, db, user)
+    running = db.scalar(
+        select(PipelineRun).where(
+            PipelineRun.video_id == video.id, PipelineRun.state == "RUNNING"
+        )
+    )
+    if running is not None:
+        raise ApiError(
+            409,
+            "PIPELINE_RUN_ACTIVE",
+            "a pipeline run is already in progress",
+            {"pipeline_run_id": running.id},
+        )
+    original = db.scalar(
+        select(MediaAsset).where(
+            MediaAsset.video_id == video.id,
+            MediaAsset.class_ == "ORIGINAL",
+            MediaAsset.status == "ACTIVE",
+        )
+    )
+    if original is None:
+        raise not_found("video has no media to process")
+
+    run = PipelineRun(
+        video_id=video.id, pipeline_version=PIPELINE_VERSION, trigger="MANUAL_RERUN"
+    )
+    db.add(run)
+    db.flush()
+    video.state = "PROBING"
+    orchestrator.tick(db, run.id)
+    db.flush()
+    return {"pipeline_run_id": run.id, "trigger": run.trigger, "state": run.state}
+
+
 @router.get("/{video_id}/processing-status", response_model=ProcessingStatusOut)
 def processing_status(
     video_id: str,
@@ -106,7 +152,8 @@ def processing_status(
                 limitations.append(lim)
 
     stages: list[StageStatus] = []
-    for stage in STAGES:
+    stage_names = list(run.scope) if (run is not None and run.scope) else list(STAGES)
+    for stage in stage_names:
         sr = statuses.get(stage)
         if sr is None:
             stages.append(StageStatus(stage=stage, status="PENDING", attempt=0))
@@ -158,6 +205,7 @@ def active_timeline(
         items=[
             TimelineItemOut(
                 item_id=i.id,
+                parent_id=i.parent_id,
                 type=i.type,
                 start_ms=i.start_ms,
                 end_ms=i.end_ms,

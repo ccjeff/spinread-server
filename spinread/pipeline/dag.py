@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-PIPELINE_VERSION = "1.0.0"
+PIPELINE_VERSION = "1.1.0"
 
 # stage -> list of prerequisite stages
 STAGES: dict[str, list[str]] = {
@@ -10,7 +10,11 @@ STAGES: dict[str, list[str]] = {
     "NORMALIZE": ["PROBE"],
     "QUALITY": ["NORMALIZE"],
     "ACTIVITY": ["QUALITY"],
-    "TIMELINE": ["ACTIVITY"],
+    "RALLY": ["ACTIVITY"],
+    "EVENTS": ["RALLY"],
+    "TIMELINE": ["EVENTS"],
+    "METRICS": ["TIMELINE"],
+    "REPORT": ["METRICS"],
 }
 
 # stage_runs statuses that satisfy a dependency
@@ -28,5 +32,9 @@ STAGE_VIDEO_STATE = {
     "NORMALIZE": "NORMALIZING",
     "QUALITY": "QUALITY_CHECKING",
     "ACTIVITY": "SEGMENTING",
+    "RALLY": "SEGMENTING",
+    "EVENTS": "SEGMENTING",
     "TIMELINE": "BUILDING_TIMELINE",
+    "METRICS": "GENERATING_REPORT",
+    "REPORT": "GENERATING_REPORT",
 }

@@ -103,6 +103,7 @@ class PipelineRun(Base):
     pipeline_version: Mapped[str] = mapped_column(Text, nullable=False)
     trigger: Mapped[str] = mapped_column(Text, nullable=False, default="UPLOAD")
     state: Mapped[str] = mapped_column(Text, nullable=False, default="RUNNING")
+    scope: Mapped[list | None] = mapped_column(JSON, nullable=True)  # NULL = full DAG
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -213,3 +214,66 @@ class TimelineItem(Base):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     provenance: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="ACTIVE")
+
+
+class MetricValue(Base):
+    __tablename__ = "metric_values"
+    __table_args__ = (
+        UniqueConstraint(
+            "video_id", "timeline_version", "metric_name", "metric_version",
+            name="uq_metric_values_video_tl_name_version",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("met"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    pipeline_run_id: Mapped[str] = mapped_column(ForeignKey("pipeline_runs.id"), nullable=False)
+    timeline_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    metric_name: Mapped[str] = mapped_column(Text, nullable=False)
+    metric_version: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AnalysisReport(Base):
+    __tablename__ = "analysis_reports"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("rep"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    timeline_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    metric_versions: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="DRAFT")
+    structured: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Finding(Base):
+    __tablename__ = "findings"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("fnd"))
+    report_id: Mapped[str] = mapped_column(ForeignKey("analysis_reports.id"), nullable=False)
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    observation: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_intervals: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    priority_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    limitations: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="PUBLISHED")
+
+
+class ExportManifest(Base):
+    __tablename__ = "export_manifests"
+    __table_args__ = (
+        UniqueConstraint("idempotency_hash", name="uq_export_manifests_idem_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("exp"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # CLIP | HIGHLIGHT
+    timeline_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    intervals: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    render_preset: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

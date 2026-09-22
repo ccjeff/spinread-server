@@ -1,9 +1,9 @@
-"""TIMELINE stage (timeline-build-0.1.0): ACTIVITY artifact -> published timeline.
+"""TIMELINE stage (timeline-build-0.2.0): artifacts -> published timeline.
 
-Creates a new timelines row (version = previous + 1, PUBLISHED, MODEL),
-copies POC items into timeline_items (poc seg_ ids preserved in
-attributes.poc_item_id), and UPSERTs the active pointer. No artifact row is
-produced — the timeline tables are the output.
+Hierarchy: ACTIVITY segments are top-level items; RALLY candidates become
+children of their segment; HIT_CANDIDATEs become children of their rally
+([t, t+40ms) intervals, actor null). When RALLY/EVENTS artifacts are missing
+the stage degrades to the flat ACTIVITY-only hierarchy (v0.1.0 behaviour).
 """
 
 from __future__ import annotations
@@ -22,17 +22,41 @@ from spinread.pipeline.stage import StageContext, StageError, StageResult
 
 log = logging.getLogger(__name__)
 
+HIT_INTERVAL_MS = 40
+
+
+def promote_item_type(item: dict) -> str:
+    """The POC emits type=ACTIVITY_SEGMENT with the coarse class in
+    attributes.activity_type; promote it to the DB item type."""
+    item_type = str(item.get("type", "UNKNOWN"))
+    attrs = item.get("attributes") or {}
+    if item_type == "ACTIVITY_SEGMENT" and attrs.get("activity_type"):
+        return str(attrs["activity_type"])
+    return item_type
+
 
 class TimelineStage:
     stage = "TIMELINE"
-    stage_version = "timeline-build-0.1.0"
+    stage_version = "timeline-build-0.2.0"
 
     def run(self, ctx: StageContext) -> StageResult:
         activity_art = ctx.prior_artifacts.get("ACTIVITY")
         if activity_art is None:
             raise StageError("MISSING_INPUT", "TIMELINE requires the ACTIVITY artifact")
-        payload = ctx.load_artifact_json(activity_art)
-        items = payload.get("items") or []
+        activity = ctx.load_artifact_json(activity_art)
+
+        rally_art = ctx.prior_artifacts.get("RALLY")
+        rallies = (
+            (ctx.load_artifact_json(rally_art).get("rallies") or [])
+            if rally_art is not None
+            else []
+        )
+        events_art = ctx.prior_artifacts.get("EVENTS")
+        events = (
+            (ctx.load_artifact_json(events_art).get("events") or [])
+            if events_art is not None
+            else []
+        )
 
         max_version = ctx.session.scalar(
             select(func.max(Timeline.version)).where(Timeline.video_id == ctx.video.id)
@@ -46,18 +70,16 @@ class TimelineStage:
         ctx.session.add(timeline)
         ctx.session.flush()
 
+        limitations = list(activity.get("limitations") or [])
         n_items = 0
-        for item in items:
+        seg_rows: list[TimelineItem] = []  # top-level segments in start order
+
+        for item in activity.get("items") or []:
             attrs = dict(item.get("attributes") or {})
             attrs["poc_item_id"] = item.get("item_id")
-            # The POC emits type=ACTIVITY_SEGMENT with the coarse class in
-            # attributes.activity_type; promote it to the DB item type.
-            item_type = str(item.get("type", "UNKNOWN"))
-            if item_type == "ACTIVITY_SEGMENT" and attrs.get("activity_type"):
-                item_type = str(attrs["activity_type"])
             row = TimelineItem(
                 timeline_id=timeline.id,
-                type=item_type,
+                type=promote_item_type(item),
                 start_ms=int(item["start_ms"]),
                 end_ms=int(item["end_ms"]),
                 actor=item.get("actor"),
@@ -69,7 +91,63 @@ class TimelineStage:
             if row.end_ms <= row.start_ms:
                 continue  # keep the CHECK constraint intact on degenerate items
             ctx.session.add(row)
+            ctx.session.flush()
+            seg_rows.append(row)
             n_items += 1
+
+        seg_rows.sort(key=lambda r: r.start_ms)
+        rally_rows: dict[int, TimelineItem] = {}  # rallies.json index -> row
+        for idx, rally in enumerate(rallies):
+            parent = _parent_segment(seg_rows, int(rally["start_ms"]))
+            if parent is None:
+                continue
+            if int(rally["end_ms"]) <= int(rally["start_ms"]):
+                continue
+            row = TimelineItem(
+                timeline_id=timeline.id,
+                parent_id=parent.id,
+                type="RALLY",
+                start_ms=int(rally["start_ms"]),
+                end_ms=int(rally["end_ms"]),
+                attributes={
+                    "hits": len(rally.get("hits_ms") or []),
+                    "poc": "rally-heuristic-0.1.0",
+                },
+                confidence=rally.get("confidence"),
+                provenance={"source": "MODEL", "source_id": "rally-heuristic-0.1.0"},
+                status="ACTIVE",
+            )
+            ctx.session.add(row)
+            ctx.session.flush()
+            rally_rows[idx] = row
+            n_items += 1
+
+        n_hits = 0
+        for event in events:
+            rally_idx = event.get("rally_index")
+            parent = rally_rows.get(rally_idx) if rally_idx is not None else None
+            if parent is None:
+                continue
+            t_ms = int(event["t_ms"])
+            start = max(t_ms, parent.start_ms)
+            end = min(t_ms + HIT_INTERVAL_MS, parent.end_ms)
+            if end <= start:
+                end = start + 1  # CHECK end_ms > start_ms
+            row = TimelineItem(
+                timeline_id=timeline.id,
+                parent_id=parent.id,
+                type="HIT_CANDIDATE",
+                start_ms=start,
+                end_ms=end,
+                actor=None,
+                attributes={"poc": "event-flat-0.1.0"},
+                confidence=event.get("confidence"),
+                provenance={"source": "MODEL", "source_id": "event-flat-0.1.0"},
+                status="ACTIVE",
+            )
+            ctx.session.add(row)
+            n_items += 1
+            n_hits += 1
 
         # Atomic pointer switch (UPSERT on video_id PK).
         pointer = ctx.session.get(TimelineActivePointer, ctx.video.id)
@@ -84,6 +162,16 @@ class TimelineStage:
 
         ctx.session.flush()
         return StageResult(
-            metrics={"timeline_version": timeline.version, "n_items": n_items},
-            limitations=payload.get("limitations") or [],
+            metrics={
+                "timeline_version": timeline.version,
+                "n_items": n_items,
+                "n_rallies": len(rally_rows),
+                "n_hit_candidates": n_hits,
+            },
+            limitations=limitations or None,
         )
+def _parent_segment(segments: list[TimelineItem], t_ms: int) -> TimelineItem | None:
+    for seg in segments:
+        if seg.start_ms <= t_ms < seg.end_ms:
+            return seg
+    return None

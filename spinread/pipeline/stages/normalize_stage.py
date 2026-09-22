@@ -24,9 +24,27 @@ from spinread.pipeline.stage import (
 
 log = logging.getLogger(__name__)
 
-MEDIA_VERSION = 1
-
 FILTER_GRAPH = "scale='min(1280,iw)':-2,fps=30,setsar=1"
+
+
+def _next_media_version(ctx: StageContext) -> int:
+    """Reruns must not collide on (video_id, class, media_version, object_key):
+    retire the currently ACTIVE derived assets and publish a bumped version."""
+    from spinread.core.models import MediaAsset as MA
+
+    active = ctx.session.scalars(
+        select(MA).where(
+            MA.video_id == ctx.video.id,
+            MA.class_.in_(["PROXY", "STREAM", "THUMBNAIL"]),
+            MA.status == "ACTIVE",
+        )
+    ).all()
+    version = 1 + max((a.media_version for a in active), default=0)
+    for a in active:
+        a.status = "RETIRED"
+    if active:
+        ctx.session.flush()
+    return version
 
 
 def _active_original(ctx: StageContext) -> MediaAsset:
@@ -48,6 +66,7 @@ class NormalizeStage:
 
     def run(self, ctx: StageContext) -> StageResult:
         original = _active_original(ctx)
+        media_version = _next_media_version(ctx)
         local_in = ctx.work_dir / "original_input"
         ctx.s3.download_file(original.object_key, str(local_in))
 
@@ -105,17 +124,17 @@ class NormalizeStage:
             raise RetryableStageError(f"ffmpeg thumbs failed: {exc}", "FFMPEG_ERROR") from exc
 
         uid, vid = ctx.video.owner_id, ctx.video.id
-        base = f"derived/{MEDIA_VERSION}"
+        base = f"derived/{media_version}"
 
         def key(rel: str) -> str:
-            return derived_key(uid, vid, MEDIA_VERSION, rel)
+            return derived_key(uid, vid, media_version, rel)
 
         def add_asset(class_: str, path, rel: str, manifest=None) -> MediaAsset:
             ctx.s3.upload_file(str(path), key(rel))
             asset = MediaAsset(
                 video_id=vid,
                 class_=class_,
-                media_version=MEDIA_VERSION,
+                media_version=media_version,
                 object_key=key(rel),
                 content_hash=file_sha256(str(path)),
                 byte_size=path.stat().st_size,
@@ -138,7 +157,7 @@ class NormalizeStage:
             MediaAsset(
                 video_id=vid,
                 class_="STREAM",
-                media_version=MEDIA_VERSION,
+                media_version=media_version,
                 object_key=key("stream/master.m3u8"),
                 content_hash=_hl.sha256(master_bytes).hexdigest(),
                 byte_size=len(master_bytes),
@@ -157,7 +176,7 @@ class NormalizeStage:
                 MediaAsset(
                     video_id=vid,
                     class_="THUMBNAIL",
-                    media_version=MEDIA_VERSION,
+                    media_version=media_version,
                     object_key=key(rel),
                     content_hash=file_sha256(str(thumb)),
                     byte_size=thumb.stat().st_size,
@@ -173,7 +192,7 @@ class NormalizeStage:
                 "stage": self.stage,
                 "stage_version": self.stage_version,
                 "video_id": vid,
-                "media_version": MEDIA_VERSION,
+                "media_version": media_version,
                 "outputs": {
                     "proxy": f"{base}/proxy.mp4",
                     "stream": f"{base}/stream/master.m3u8",
