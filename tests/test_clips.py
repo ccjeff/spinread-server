@@ -113,8 +113,9 @@ def test_highlight_reel_concat(client, ready_video, tmp_path):
             break
         time.sleep(0.5)
     assert st["status"] == "READY", st
+    assert st["download_url"] == f"/api/highlight-reels/{reel['clip_id']}/download"
 
-    dl = client.get(f"/api/highlight-reels/{reel['clip_id']}/download", headers=headers)
+    dl = client.get(st["download_url"], headers=headers)
     assert dl.status_code == 200
     out = tmp_path / "highlight.mp4"
     out.write_bytes(dl.content)

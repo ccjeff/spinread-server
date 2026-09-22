@@ -188,3 +188,100 @@ def test_version_read_and_correction_run(client, edit_video):
     report = client.get(f"/api/videos/{video_id}/reports/active", headers=headers)
     assert report.status_code == 200
     assert report.json()["timeline_version"] == new_version
+
+
+def test_rally_boundary_shrink_drops_out_of_range_hits(client, edit_video):
+    """RALLY UPDATE_BOUNDARY shrink: 200, hits inside kept exactly, hits
+    beyond the new boundary absent from the new version (REMOVED semantics)."""
+    video_id, headers = edit_video
+    tl = _active(client, headers, video_id)
+    rally = next(i for i in tl["items"] if i["type"] == "RALLY")
+    hits_before = [
+        i for i in tl["items"] if i["type"] == "HIT_CANDIDATE" and i["parent_id"] == rally["item_id"]
+    ]
+    assert len(hits_before) >= 4
+
+    new_start = rally["start_ms"] + 2000
+    new_end = rally["end_ms"] - 2000
+    assert new_start < new_end  # fixture rally is ~10 s long
+    r = _edit(client, headers, video_id, tl["version"], [
+        {"op": "UPDATE_BOUNDARY", "timeline_item_id": rally["item_id"],
+         "start_ms": new_start, "end_ms": new_end},
+    ])
+    assert r.status_code == 200, r.text
+
+    tl2 = _active(client, headers, video_id)
+    assert tl2["version"] == tl["version"] + 1
+    rally2 = next(i for i in tl2["items"] if i["type"] == "RALLY")
+    assert (rally2["start_ms"], rally2["end_ms"]) == (new_start, new_end)
+    hits_after = [
+        i for i in tl2["items"] if i["type"] == "HIT_CANDIDATE" and i["parent_id"] == rally2["item_id"]
+    ]
+    # every surviving hit is valid and inside the new bounds
+    for h in hits_after:
+        assert h["end_ms"] > h["start_ms"]
+        assert new_start <= h["start_ms"]
+        assert h["end_ms"] <= new_end
+    # in-range hits are preserved (start times match the old in-range subset)
+    expected_starts = sorted(
+        h["start_ms"] for h in hits_before
+        if h["start_ms"] >= new_start and h["end_ms"] <= new_end
+    )
+    assert sorted(h["start_ms"] for h in hits_after) == expected_starts
+    assert 0 < len(hits_after) < len(hits_before)
+
+
+def test_rally_boundary_expand_keeps_hits_untouched(client, edit_video):
+    """RALLY UPDATE_BOUNDARY expand: 200 and hit children neither dropped nor re-clamped."""
+    video_id, headers = edit_video
+    tl = _active(client, headers, video_id)
+    rally = next(i for i in tl["items"] if i["type"] == "RALLY")
+    hits_before = sorted(
+        (i["start_ms"], i["end_ms"])
+        for i in tl["items"]
+        if i["type"] == "HIT_CANDIDATE" and i["parent_id"] == rally["item_id"]
+    )
+
+    r = _edit(client, headers, video_id, tl["version"], [
+        {"op": "UPDATE_BOUNDARY", "timeline_item_id": rally["item_id"],
+         "start_ms": rally["start_ms"] - 3000, "end_ms": rally["end_ms"] + 2000},
+    ])
+    assert r.status_code == 200, r.text
+
+    tl2 = _active(client, headers, video_id)
+    rally2 = next(i for i in tl2["items"] if i["type"] == "RALLY")
+    assert (rally2["start_ms"], rally2["end_ms"]) == (
+        rally["start_ms"] - 3000, rally["end_ms"] + 2000,
+    )
+    hits_after = sorted(
+        (i["start_ms"], i["end_ms"])
+        for i in tl2["items"]
+        if i["type"] == "HIT_CANDIDATE" and i["parent_id"] == rally2["item_id"]
+    )
+    assert hits_after == hits_before
+
+
+def test_mixed_top_and_rally_ops_single_submit(client, edit_video):
+    """One request mixing top-level and RALLY ops applies atomically."""
+    video_id, headers = edit_video
+    tl = _active(client, headers, video_id)
+    top = sorted((i for i in tl["items"] if i["parent_id"] is None), key=lambda i: i["start_ms"])
+    rally = next(i for i in tl["items"] if i["type"] == "RALLY")
+
+    r = _edit(client, headers, video_id, tl["version"], [
+        {"op": "UPDATE_BOUNDARY", "timeline_item_id": top[0]["item_id"],
+         "start_ms": top[0]["start_ms"], "end_ms": top[0]["end_ms"]},
+        {"op": "UPDATE_BOUNDARY", "timeline_item_id": rally["item_id"],
+         "start_ms": rally["start_ms"] + 1000, "end_ms": rally["end_ms"]},
+        {"op": "SET_LABEL", "timeline_item_id": top[0]["item_id"],
+         "field": "type", "value": "INSTRUCTION"},
+    ])
+    assert r.status_code == 200, r.text
+    tl2 = _active(client, headers, video_id)
+    assert tl2["version"] == tl["version"] + 1
+    top2 = sorted((i for i in tl2["items"] if i["parent_id"] is None), key=lambda i: i["start_ms"])
+    assert top2[0]["type"] == "INSTRUCTION"
+    rally2 = next(i for i in tl2["items"] if i["type"] == "RALLY")
+    assert rally2["start_ms"] == rally["start_ms"] + 1000
+    for h in tl2["items"]:
+        assert h["end_ms"] > h["start_ms"]

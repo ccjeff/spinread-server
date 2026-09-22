@@ -47,13 +47,18 @@ class ExportOut(BaseModel):
 
 def _out(db: Session, m: ExportManifest) -> ExportOut:
     status = export_status(db, m)
+    download_path = (
+        f"/api/highlight-reels/{m.id}/download"
+        if m.kind == "HIGHLIGHT"
+        else f"/api/clips/{m.id}/download"
+    )
     return ExportOut(
         clip_id=m.id,
         video_id=m.video_id,
         kind=m.kind,
         status=status,
         intervals=m.intervals,
-        download_url=f"/api/clips/{m.id}/download" if status == "READY" else None,
+        download_url=download_path if status == "READY" else None,
     )
 
 

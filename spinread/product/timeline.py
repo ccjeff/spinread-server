@@ -84,6 +84,25 @@ def _find(roots: list[_Node], item_id: str) -> tuple[_Node | None, list[_Node]]:
     return None, roots
 
 
+def _clamp_subtree(node: _Node) -> None:
+    """Constrain children to the node's (new) interval, recursively.
+
+    Children fully inside keep their exact interval; partially overlapping
+    ones are truncated; fully outside ones are dropped (in full-copy timeline
+    versioning, absence from the new version IS the REMOVED semantics).
+    """
+    kept: list[_Node] = []
+    for child in node.children:
+        s = max(child.start_ms, node.start_ms)
+        e = min(child.end_ms, node.end_ms)
+        if e <= s:
+            continue  # outside the new bounds: subtree goes with it
+        child.start_ms, child.end_ms = s, e
+        _clamp_subtree(child)
+        kept.append(child)
+    node.children = kept
+
+
 def _apply_ops(roots: list[_Node], ops: list[dict]) -> list[_Node]:
     for op in ops:
         kind = op.get("op")
@@ -93,12 +112,9 @@ def _apply_ops(roots: list[_Node], ops: list[dict]) -> list[_Node]:
             raise EditError("ITEM_NOT_FOUND", f"timeline item {item_id} not found")
 
         if kind == "UPDATE_BOUNDARY":
-            start = int(op["start_ms"])
-            end = int(op["end_ms"])
-            node.start_ms, node.end_ms = start, end
-            for child in node.children:  # keep children inside the new parent
-                child.start_ms = max(child.start_ms, start)
-                child.end_ms = min(child.end_ms, end)
+            node.start_ms = int(op["start_ms"])
+            node.end_ms = int(op["end_ms"])
+            _clamp_subtree(node)  # out-of-bounds descendants are REMOVED, not clamped to nothing
 
         elif kind == "SET_LABEL":
             if op.get("field") != "type":
