@@ -30,6 +30,19 @@ log = logging.getLogger(__name__)
 REPORT_VERSION = "report-0.1.0"
 _MIN_SAMPLE_PUBLISH = 4
 
+# HLD §10.2: evidence is a *representative* sample, never the full set.
+MAX_EVIDENCE_INTERVALS = 20
+
+
+def _cap_evidence(evidence: list) -> tuple[list, str | None]:
+    """Keep at most MAX_EVIDENCE_INTERVALS entries (order preserved — the
+    metrics stage already orders by relevance). Returns (shown, limitation)."""
+    total = len(evidence)
+    if total <= MAX_EVIDENCE_INTERVALS:
+        return evidence, None
+    shown = evidence[:MAX_EVIDENCE_INTERVALS]
+    return shown, f"evidence truncated: {total} intervals, showing first {len(shown)}"
+
 
 class ReportStage:
     stage = "REPORT"
@@ -66,15 +79,19 @@ class ReportStage:
 
         def add(category: str, observation: str, ev: list, n: int, score: float, limits: list[str] | None = None):
             state = "PUBLISHED" if n >= _MIN_SAMPLE_PUBLISH else "LOW_EVIDENCE"
+            shown, truncation_note = _cap_evidence(ev)
+            limitations = list(limits or [])
+            if truncation_note is not None:
+                limitations.append(truncation_note)
             findings.append(
                 Finding(
                     report_id="",  # filled after report flush
                     category=category,
                     observation=observation,
-                    evidence_intervals=ev,
+                    evidence_intervals=shown,
                     sample_count=n,
                     priority_score=score,
-                    limitations=limits or [],
+                    limitations=limitations,
                     state=state,
                 )
             )

@@ -93,3 +93,63 @@ def test_correction_run_recomputes_metrics(client, ready_video):
     # segment 1 shortened by 3 s
     assert metrics["valid_duration_ms"] == 46000 - 3000
     assert metrics["correction_rate"] > 0.0
+
+
+def test_coverage_finding_evidence_truncated(client, ready_video):
+    """A COVERAGE finding with >20 evidence intervals is capped at 20 (order
+    preserved) and carries a truncation note in limitations (HLD §10.2)."""
+    from sqlalchemy import select
+
+    from spinread.core.db import make_engine, make_session_factory
+    from spinread.core.models import MetricValue, PipelineRun
+    from spinread.pipeline import orchestrator
+
+    video_id, headers = ready_video
+    report = client.get(f"/api/videos/{video_id}/reports/active", headers=headers).json()
+    tl_version = report["timeline_version"]
+
+    # Fabricate a low-coverage metric row carrying 25 evidence intervals.
+    factory = make_session_factory(make_engine())
+    session = factory()
+    row = session.scalar(
+        select(MetricValue).where(
+            MetricValue.video_id == video_id,
+            MetricValue.timeline_version == tl_version,
+            MetricValue.metric_name == "confidence_coverage",
+        )
+    )
+    assert row is not None
+    intervals = [[i * 1000, i * 1000 + 500] for i in range(25)]
+    row.value = {
+        "result": 0.4,  # low_ratio 0.6 > 0.3 -> COVERAGE triggers
+        "evidence_intervals": intervals,
+        "video_duration_ms": 60000,
+    }
+    row.sample_count = 25
+    run = PipelineRun(
+        video_id=video_id, pipeline_version="1.1.0", trigger="CORRECTION"
+    )
+    session.add(run)
+    session.flush()
+    orchestrator.tick(session, run.id, only_stages={"REPORT"})
+    session.commit()
+    session.close()
+
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        run_worker(once=True, worker_id="pytest-truncation")
+        st = client.get(f"/api/videos/{video_id}/processing-status", headers=headers).json()
+        if all(s["status"] in ("SUCCEEDED", "REUSED_CACHE") for s in st["stages"]):
+            break
+        time.sleep(0.5)
+    else:
+        raise AssertionError(f"REPORT rerun did not finish: {st}")
+
+    report = client.get(f"/api/videos/{video_id}/reports/active", headers=headers).json()
+    coverage = next(f for f in report["findings"] if f["category"] == "COVERAGE")
+    assert len(coverage["evidence_intervals"]) == 20
+    assert coverage["evidence_intervals"] == intervals[:20]  # order preserved
+    assert any(
+        "evidence truncated: 25 intervals, showing first 20" in lim
+        for lim in coverage["limitations"]
+    ), coverage["limitations"]
