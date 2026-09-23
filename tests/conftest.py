@@ -96,7 +96,17 @@ def client(require_services):
     from spinread.api.main import app
 
     with TestClient(app) as c:
-        yield c
+        c.created_test_videos = []
+        try:
+            yield c
+        finally:
+            # Only IDs created by this test session, including partial uploads.
+            # Never clean by filename or touch existing user videos.
+            for video_id, headers in c.created_test_videos:
+                response = c.delete(f"/api/videos/{video_id}", headers=headers)
+                if response.status_code not in (204, 404):
+                    import warnings
+                    warnings.warn(f"Could not clean test video {video_id}: HTTP {response.status_code}")
 
 
 def login_headers(client: TestClient) -> dict[str, str]:
@@ -125,6 +135,7 @@ def upload_video(client: TestClient, headers: dict, video_path: Path) -> str:
     assert resp.status_code == 201, resp.text
     upload = resp.json()
     video_id = upload["video_id"]
+    client.created_test_videos.append((video_id, dict(headers)))
 
     data = video_path.read_bytes()
     completed = []
