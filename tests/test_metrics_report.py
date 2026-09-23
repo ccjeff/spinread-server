@@ -34,8 +34,8 @@ def test_metrics_hand_check(client, ready_video):
     assert metrics["hits_per_rally"]["mean"] > 3
     assert metrics["hits_per_rally"]["max"] >= 10
     assert metrics["segment_type_distribution"] == {"RALLY_LIKE": 2}
-    assert metrics["correction_rate"] == 0.0
-    assert 0.0 <= metrics["confidence_coverage"] <= 1.0
+    assert "correction_rate" not in metrics
+    assert "confidence_coverage" not in metrics
 
     # findings: deterministic rules over this fixture
     # non-rally share = 1 - 46000/60000 ≈ 0.233 < 0.25 -> no ACTIVITY_MIX
@@ -43,7 +43,7 @@ def test_metrics_hand_check(client, ready_video):
     categories = {f["category"] for f in body["findings"]}
     assert "ACTIVITY_MIX" not in categories
     assert "RALLY_LENGTH" not in categories
-    assert categories <= {"COVERAGE"}
+    assert categories == set()
     for f in body["findings"]:
         assert f["state"] in ("PUBLISHED", "LOW_EVIDENCE")
         assert f["sample_count"] >= 0
@@ -52,7 +52,7 @@ def test_metrics_hand_check(client, ready_video):
     assert set(body["metric_versions"]) == {
         "valid_duration_ms", "rally_count", "rally_duration_ms",
         "rally_length_distribution", "hits_per_rally",
-        "segment_type_distribution", "confidence_coverage", "correction_rate",
+        "segment_type_distribution",
     }
 
 
@@ -92,7 +92,7 @@ def test_correction_run_recomputes_metrics(client, ready_video):
     metrics = report["structured"]["metrics"]
     # segment 1 shortened by 3 s
     assert metrics["valid_duration_ms"] == 46000 - 3000
-    assert metrics["correction_rate"] > 0.0
+    assert "correction_rate" not in metrics
 
 
 def test_coverage_finding_evidence_truncated(client, ready_video):
@@ -146,10 +146,11 @@ def test_coverage_finding_evidence_truncated(client, ready_video):
         raise AssertionError(f"REPORT rerun did not finish: {st}")
 
     report = client.get(f"/api/videos/{video_id}/reports/active", headers=headers).json()
-    coverage = next(f for f in report["findings"] if f["category"] == "COVERAGE")
-    assert len(coverage["evidence_intervals"]) == 20
-    assert coverage["evidence_intervals"] == intervals[:20]  # order preserved
-    assert any(
-        "evidence truncated: 25 intervals, showing first 20" in lim
-        for lim in coverage["limitations"]
-    ), coverage["limitations"]
+    assert report["findings"] == []
+    assert "confidence_coverage" not in report["structured"]["metrics"]
+    # The diagnostic is retained internally for engineering, not discarded.
+    from spinread.core.models import Finding
+    with factory() as session:
+        coverage = session.scalar(select(Finding).where(Finding.report_id == report["report_id"], Finding.category == "COVERAGE"))
+        assert coverage.state == "INTERNAL"
+        assert coverage.evidence_intervals == intervals[:20]

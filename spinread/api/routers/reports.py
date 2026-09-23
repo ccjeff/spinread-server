@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from spinread.core.access import viewable_video, audit
+from spinread.product.report_policy import public_finding, INTERNAL_METRICS
 
 from typing import Any
 
@@ -63,8 +64,8 @@ def get_active_report(
         video_id=report.video_id,
         timeline_version=report.timeline_version,
         state=report.state,
-        metric_versions=report.metric_versions,
-        structured=report.structured,
+        metric_versions={k:v for k,v in report.metric_versions.items() if k not in INTERNAL_METRICS},
+        structured={**report.structured, "metrics": {k:v for k,v in report.structured.get("metrics", {}).items() if k not in INTERNAL_METRICS}},
         findings=[
             FindingOut(
                 id=f.id,
@@ -76,6 +77,6 @@ def get_active_report(
                 limitations=f.limitations,
                 state=f.state,
             )
-            for f in findings
+            for f in findings if public_finding(f)
         ],
     )

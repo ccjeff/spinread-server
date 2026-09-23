@@ -9,6 +9,7 @@ from spinread.api.errors import ApiError, forbidden, not_found
 from spinread.core.models import (User, Video, CoachGrant, ConsentGrant, ReviewRequest,
     CoachFeedback, Timeline, TimelineItem, TimelineActivePointer, QuizAttempt, QuizItem, utcnow)
 from spinread.core.access import audit, viewable_video, coach_can_view, require_coach
+from spinread.product.report_policy import public_plan_item
 from spinread.core.mutations import mutate, version_check
 
 router = APIRouter(prefix="/api", tags=["coaching"])
@@ -297,6 +298,7 @@ def dashboard(coach_id: str, db: DB, user: Actor):
         PlanItem.source_report_id == AnalysisReport.id).join(TrainingPlan, PlanItem.plan_id == TrainingPlan.id)
         .where(AnalysisReport.video_id.in_(video_ids), TrainingPlan.state == "ACTIVE")
         .order_by(PlanItem.updated_at.desc())).all()
+    tasks = [(item, vid) for item, vid in tasks if public_plan_item(db, item)]
     task_ids = {item.id for item, _ in tasks}
     retests = db.scalars(select(PlanItemRetest).where(PlanItemRetest.plan_item_id.in_(task_ids),
         PlanItemRetest.video_id.in_(video_ids)).order_by(PlanItemRetest.created_at.desc())).all()

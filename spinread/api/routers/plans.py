@@ -10,6 +10,7 @@ from spinread.core.models import (AnalysisReport, Finding, TrainingPlan, PlanIte
     PlanItemRetest, Video, User, utcnow)
 from spinread.core.access import audit, viewable_video, coach_can_view
 from spinread.core.mutations import mutate, version_check
+from spinread.product.report_policy import public_plan_item, public_finding
 from spinread.product.compare import compare, report_current, METRICS
 
 router = APIRouter(prefix="/api", tags=["training-plans"])
@@ -59,6 +60,7 @@ def plan_out(db, plan, user):
     items = db.scalars(select(PlanItem).where(PlanItem.plan_id == plan.id).order_by(PlanItem.priority, PlanItem.created_at)).all()
     visible = []
     for item in items:
+        if not public_plan_item(db, item): continue
         report = db.get(AnalysisReport, item.source_report_id)
         video = db.get(Video, report.video_id)
         if video.deleted_at is None and (video.owner_id == user.id or coach_can_view(db, user, video)):
@@ -96,11 +98,9 @@ class GenerateIn(BaseModel):
     report_id: str
 
 
-TEMPLATES = {
-    "COVERAGE": ("复核录制质量与低置信片段", "固定机位并改善光线，回看低置信片段，与教练确认哪些判断可靠。", "confidence_coverage", "increase"),
-    "ACTIVITY_MIX": ("回看训练与停顿的时间分配", "回看报告证据，区分指导、捡球与休息；和教练商定训练时段，再录制相同训练。", "active_fraction", "increase"),
-    "RALLY_LENGTH": ("复核超长回合的切分边界", "回看超长回合，在死球位置修正边界；这是数据复核任务，不是技术能力结论。", "rally_duration_ms.max", "decrease"),
-}
+# Only validated training findings may be mapped to prescriptions.
+# Current rules are detector diagnostics, so no automated prescriptions yet.
+TEMPLATES = {}
 
 
 def ensure_plan(db, user_id, report_id):
@@ -257,4 +257,4 @@ def evidence(report_id: str, db: DB, user: Actor):
     rows = db.scalars(select(Finding).where(Finding.report_id == report.id))
     return {"report_id": report.id, "video_id": report.video_id, "timeline_version": report.timeline_version,
         "findings": [{"id": f.id, "observation": f.observation, "intervals": f.evidence_intervals,
-            "sample_count": f.sample_count, "limitations": f.limitations, "state": f.state} for f in rows]}
+            "sample_count": f.sample_count, "limitations": f.limitations, "state": f.state} for f in rows if public_finding(f)]}

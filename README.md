@@ -153,3 +153,5 @@ pytest -q        # 需要 compose 栈已起;全部打真 PG+MinIO+ffmpeg
 ## 击球重计数
 
 新分析使用 `rally-racket-0.2.0`，将球拍触球候选与通用音频冲击分离。保留当前分段边界的修复命令：`.venv/bin/python -m scripts.recount_hits VIDEO_ID`（只预览）；加 `--apply --base-version N` 发布新时间线并重算指标/报告。历史保留；旧 quiz 与训练计划按时间线版本规则标为待复核。回合卡片展示估计次数，包含双方触球。边界编辑后同步重算子击球计数，平均击球数包含零候选回合。
+
+当前用户报告只交付训练指标与可靠的训练发现。检测置信度/切分诊断留在内部，旧自动诊断任务从计划视图排除。回合重切可使用 `python -m scripts.resegment_rallies VIDEO_ID` 预览，再加 `--apply --base-version N` 发布新版本；保留上层人工分段及历史，原回合子节点替换为视听联合候选。

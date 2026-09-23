@@ -29,7 +29,7 @@ class RallyStage:
             raise StageError("MISSING_INPUT", "RALLY requires the ACTIVITY artifact")
         activity = ctx.load_artifact_json(activity_art)
 
-        limitations: list[str] = ["Racket hits are uncalibrated audio estimates; quiet/off-camera contacts may be missed."]
+        limitations: list[str] = ["Internal: racket audio candidates plus visual motion-reset evidence; not ball tracking."]
         segments: list[tuple[int, int]] = []
         for item in activity.get("items") or []:
             if promote_item_type(item) == "RALLY_LIKE":

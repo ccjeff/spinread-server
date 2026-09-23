@@ -26,7 +26,7 @@ def test_rally_and_hit_hierarchy(client, ready_video):
         assert parent["type"] == "RALLY_LIKE"
         assert parent["start_ms"] <= r["start_ms"] <= parent["end_ms"]
         assert r["attributes"]["hits"] >= 3
-        assert r["attributes"]["poc"] == "rally-racket-0.2.0"
+        assert r["attributes"]["poc"] == "rally-av-reset-0.3.0"
 
     hits = [i for i in items if i["type"] == "HIT_CANDIDATE"]
     assert hits, "expected HIT_CANDIDATE items"
@@ -51,6 +51,6 @@ def test_rally_boundaries_match_synthetic_structure(client, ready_video):
     assert len(rallies) == 2, rallies
     first, second = rallies
     assert first["start_ms"] < 3000
-    assert first["end_ms"] == by_id[first["parent_id"]]["end_ms"]
+    assert first["end_ms"] <= by_id[first["parent_id"]]["end_ms"]
     assert 35000 <= second["start_ms"] < 38000
-    assert second["end_ms"] == by_id[second["parent_id"]]["end_ms"]
+    assert second["end_ms"] <= by_id[second["parent_id"]]["end_ms"]

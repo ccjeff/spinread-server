@@ -50,9 +50,11 @@ def share(c, video="video"):
 
 
 def plan(c):
-    r = post(c, "/training-plans/generate", {"report_id": "report-video"})
+    r = post(c, "/training-plans/items", {"report_id": "report-video", "title": "Practice task",
+        "drill": {"description": "Practice with coach"},
+        "retest": {"context": CONTEXT["practice_context"], "metric": "active_fraction"}})
     assert r.status_code == 200, r.text
-    return r.json()["plan"]["items"][0]
+    return r.json()
 
 
 def test_coach_needs_both_grants_and_revocation_denies_every_read(loop):
@@ -232,3 +234,19 @@ def test_dashboard_completed_progress_and_revoked_relationship(loop):
     assert data['players'][0]['tasks'][0]['player_note'] == 'Two sessions'
     post(c, '/coach-grants/'+grant['id']+'/revoke', {'base_version': 1})
     assert c.get('/api/coaches/coach/dashboard', headers=h).json()['players'] == []
+
+
+def test_diagnostics_are_not_training_findings_or_suggestions(loop):
+    c, factory = loop
+    from spinread.core.models import TrainingPlan, PlanItem
+    with factory.begin() as db:
+        db.add(TrainingPlan(id='legacy-plan', user_id='owner', source_report_id='report-video'))
+        db.flush()
+        db.add(PlanItem(id='legacy-task', plan_id='legacy-plan', source_report_id='report-video',
+            title='Inspect segmentation', finding_ids=['finding'], source='SYSTEM', drill={}, retest={}))
+    assert c.get('/api/videos/video/reports/active').json()['findings'] == []
+    result = post(c,'/training-plans/generate',{'report_id':'report-video'}).json()
+    assert result['added'] == 0 and result['plan']['items'] == []
+    assert c.get('/api/reports/report-video/evidence').json()['findings'] == []
+    share(c)
+    assert c.get('/api/coaches/coach/dashboard', headers={'X-Test-User':'coach'}).json()['players'][0]['tasks'] == []

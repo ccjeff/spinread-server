@@ -5,7 +5,8 @@ Deterministic rule findings (no LLM at P0):
 2. ACTIVITY_MIX  — non-RALLY_LIKE time ratio > 0.25
 3. RALLY_LENGTH  — at least one rally longer than 60 s (may be under-segmented)
 
-A triggered rule is PUBLISHED when its sample_count >= 4, else LOW_EVIDENCE.
+These legacy rules produce INTERNAL engineering diagnostics only.
+Player delivery and plan generation exclude these categories.
 Previous PUBLISHED reports of the video flip to SUPERSEDED.
 """
 
@@ -27,8 +28,7 @@ from spinread.pipeline.stage import StageContext, StageError, StageResult
 
 log = logging.getLogger(__name__)
 
-REPORT_VERSION = "report-0.1.0"
-_MIN_SAMPLE_PUBLISH = 4
+REPORT_VERSION = "report-0.2.0"
 
 # HLD §10.2: evidence is a *representative* sample, never the full set.
 MAX_EVIDENCE_INTERVALS = 20
@@ -78,7 +78,7 @@ class ReportStage:
         findings: list[Finding] = []
 
         def add(category: str, observation: str, ev: list, n: int, score: float, limits: list[str] | None = None):
-            state = "PUBLISHED" if n >= _MIN_SAMPLE_PUBLISH else "LOW_EVIDENCE"
+            state = "INTERNAL"  # Detector diagnostics never become player advice.
             shown, truncation_note = _cap_evidence(ev)
             limitations = list(limits or [])
             if truncation_note is not None:
@@ -103,7 +103,7 @@ class ReportStage:
             add(
                 "COVERAGE",
                 f"{low_ratio:.0%} of timeline items have confidence below 0.6; "
-                "consider better lighting/camera position or manual review.",
+                "uncalibrated detector output; internal diagnostic only.",
                 evidence("confidence_coverage"),
                 sample("confidence_coverage"),
                 min(1.0, low_ratio),
