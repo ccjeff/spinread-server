@@ -57,7 +57,7 @@ class QualityStage:
         return StageResult(
             artifact_name="quality.json",
             artifact_json=artifact,
-            metrics={"audio_present": audio_present},
+            metrics={"audio_present": audio_present, "capabilities": capabilities},
             limitations=[
                 "MLP heuristic: capabilities derived from probe metadata only"
             ],

@@ -1,6 +1,7 @@
 """Videos: list, detail, soft-delete, processing status, active timeline."""
 
 from __future__ import annotations
+from spinread.core.access import viewable_video, audit
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -60,7 +61,7 @@ def get_video(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> VideoOut:
-    video = get_owned_video(video_id, db, user)
+    video = viewable_video(video_id, db, user)
     return VideoOut(
         **_list_item(video).model_dump(),
         target_player=video.target_player,
@@ -76,6 +77,7 @@ def delete_video(
     user: User = Depends(get_current_user),
 ) -> None:
     video = get_owned_video(video_id, db, user)
+    audit(db, user.id, "VIDEO_DELETE_REQUESTED", video.id, video.id)
     video.deleted_at = utcnow()
     video.state = "DELETED"
     assets = db.scalars(select(MediaAsset).where(MediaAsset.video_id == video.id)).all()
@@ -186,7 +188,7 @@ def active_timeline(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> ActiveTimelineOut:
-    video = get_owned_video(video_id, db, user)
+    video = viewable_video(video_id, db, user)
     pointer = db.get(TimelineActivePointer, video.id)
     if pointer is None:
         raise not_found("no active timeline for this video")

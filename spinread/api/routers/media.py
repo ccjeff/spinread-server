@@ -7,6 +7,7 @@
 """
 
 from __future__ import annotations
+from spinread.core.access import viewable_video, audit
 
 import re
 
@@ -43,7 +44,8 @@ def get_master_playlist(
     user: User = Depends(get_current_user),
     s3: S3ObjectStore = Depends(get_s3),
 ) -> Response:
-    video = get_owned_video(video_id, db, user)
+    video = viewable_video(video_id, db, user)
+    audit(db, user.id, "MEDIA_VIEW", video_id, video_id)
     asset = _active_asset(db, video.id, "STREAM")
     playlist = s3.get_bytes(asset.object_key).decode("utf-8")
     base = f"/api/videos/{video.id}/stream"
@@ -68,7 +70,8 @@ def get_segment(
 ) -> Response:
     if not re.fullmatch(r"[A-Za-z0-9._-]+\.ts", segment):
         raise bad_request("BAD_SEGMENT", "invalid segment name")
-    video = get_owned_video(video_id, db, user)
+    video = viewable_video(video_id, db, user)
+    audit(db, user.id, "MEDIA_VIEW", video_id, video_id)
     stream = _active_asset(db, video.id, "STREAM")
     key = stream.object_key.rsplit("/", 1)[0] + "/" + segment
     head = s3.head(key)
@@ -85,7 +88,8 @@ def get_proxy(
     user: User = Depends(get_current_user),
     s3: S3ObjectStore = Depends(get_s3),
 ) -> Response:
-    video = get_owned_video(video_id, db, user)
+    video = viewable_video(video_id, db, user)
+    audit(db, user.id, "MEDIA_VIEW", video_id, video_id)
     asset = _active_asset(db, video.id, "PROXY")
 
     range_header = request.headers.get("range")
@@ -130,7 +134,8 @@ def get_thumb(
     user: User = Depends(get_current_user),
     s3: S3ObjectStore = Depends(get_s3),
 ) -> Response:
-    video = get_owned_video(video_id, db, user)
+    video = viewable_video(video_id, db, user)
+    audit(db, user.id, "MEDIA_VIEW", video_id, video_id)
     stream_hint = f"thumbs/{ts_ms}.jpg"
     asset = db.scalar(
         select(MediaAsset).where(

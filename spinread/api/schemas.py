@@ -14,6 +14,7 @@ class LoginRequest(BaseModel):
 
 
 class UserOut(BaseModel):
+    role: str = "USER"
     id: str
     email: str
     display_name: str

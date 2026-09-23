@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 from spinread.api import deps
 from spinread.api.errors import ApiError, api_error_handler, error_body
-from spinread.api.routers import auth, clips, media, reports, timelines, uploads, videos, quizzes
+from spinread.api.routers import auth, clips, media, reports, timelines, uploads, videos, quizzes, plans, coaching
 from spinread.config import get_settings
 from spinread.core.seed import seed_demo_user
 
@@ -27,6 +27,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def private_responses(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/") and request.url.path != "/api/health":
+        response.headers["Cache-Control"] = "private, no-store"
+        vary = response.headers.get("Vary", "")
+        if "authorization" not in vary.lower():
+            response.headers["Vary"] = ", ".join(filter(None, [vary, "Authorization"]))
+    return response
+
 
 app.add_exception_handler(ApiError, api_error_handler)
 
@@ -47,6 +58,8 @@ app.include_router(timelines.router)
 app.include_router(reports.router)
 app.include_router(clips.router)
 app.include_router(quizzes.router)
+app.include_router(plans.router)
+app.include_router(coaching.router)
 
 
 @app.get("/api/health")

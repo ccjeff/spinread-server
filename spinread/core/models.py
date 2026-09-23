@@ -53,6 +53,8 @@ class Video(Base):
     filename: Mapped[str] = mapped_column(Text, nullable=False)
     session_type: Mapped[str] = mapped_column(Text, nullable=False, default="TRAINING")
     target_player: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    training_context: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    context_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     probe: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -351,3 +353,117 @@ class PracticeWindow(Base):
     label_source: Mapped[str | None] = mapped_column(Text, nullable=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     reviews: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+
+class CoachGrant(Base):
+    __tablename__ = "coach_grants"
+    __table_args__ = (UniqueConstraint("player_id", "coach_id"),)
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("cg"))
+    player_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    coach_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    status: Mapped[str] = mapped_column(Text, default="ACTIVE")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ConsentGrant(Base):
+    __tablename__ = "consent_grants"
+    __table_args__ = (UniqueConstraint("video_id", "purpose", "granted_to"),)
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("cns"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    subject_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    granted_to: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    state: Mapped[str] = mapped_column(Text, default="ACTIVE")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("aud"))
+    actor_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    video_id: Mapped[str | None] = mapped_column(ForeignKey("videos.id"))
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    resource_id: Mapped[str] = mapped_column(Text, nullable=False)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IdempotencyKey(Base):
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (UniqueConstraint("user_id", "key"),)
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("idem"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    request_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    response_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TrainingPlan(Base):
+    __tablename__ = "training_plans"
+    __table_args__ = (Index("uq_active_training_plan", "user_id", unique=True,
+        postgresql_where=text("state = 'ACTIVE'"), sqlite_where=text("state = 'ACTIVE'")),)
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("plan"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    source_report_id: Mapped[str] = mapped_column(ForeignKey("analysis_reports.id"), nullable=False)
+    state: Mapped[str] = mapped_column(Text, default="ACTIVE")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PlanItem(Base):
+    __tablename__ = "plan_items"
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("pi"))
+    plan_id: Mapped[str] = mapped_column(ForeignKey("training_plans.id"), nullable=False)
+    source_report_id: Mapped[str] = mapped_column(ForeignKey("analysis_reports.id"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    priority: Mapped[int] = mapped_column(Integer, default=1)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    finding_ids: Mapped[list] = mapped_column(JSON, default=list)
+    drill: Mapped[dict] = mapped_column(JSON, default=dict)
+    retest: Mapped[dict] = mapped_column(JSON, default=dict)
+    source: Mapped[str] = mapped_column(Text, default="SYSTEM")
+    locked_by_coach: Mapped[bool] = mapped_column(default=False)
+    status: Mapped[str] = mapped_column(Text, default="ACTIVE")
+    player_note: Mapped[str] = mapped_column(Text, default="")
+    history: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PlanItemRetest(Base):
+    __tablename__ = "plan_item_retests"
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("rt"))
+    plan_item_id: Mapped[str] = mapped_column(ForeignKey("plan_items.id"), nullable=False)
+    plan_item_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    report_id: Mapped[str] = mapped_column(ForeignKey("analysis_reports.id"), nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ReviewRequest(Base):
+    __tablename__ = "review_requests"
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("rev"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    coach_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    timeline_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(Text, default="OPEN")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    question: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CoachFeedback(Base):
+    __tablename__ = "coach_feedback"
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("fb"))
+    review_request_id: Mapped[str] = mapped_column(ForeignKey("review_requests.id"), nullable=False)
+    timeline_item_id: Mapped[str | None] = mapped_column(ForeignKey("timeline_items.id"))
+    start_ms: Mapped[int | None] = mapped_column(BigInteger)
+    end_ms: Mapped[int | None] = mapped_column(BigInteger)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

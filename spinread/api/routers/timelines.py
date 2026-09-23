@@ -1,6 +1,7 @@
 """Timeline edits (HLD §8.6) + arbitrary-version timeline reads."""
 
 from __future__ import annotations
+from spinread.core.access import viewable_video
 
 from typing import Any, Literal
 
@@ -110,7 +111,7 @@ def get_timeline_version(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> ActiveTimelineOut:
-    video = get_owned_video(video_id, db, user)
+    video = viewable_video(video_id, db, user)
     timeline = db.scalar(
         select(Timeline).where(
             Timeline.video_id == video.id, Timeline.version == version

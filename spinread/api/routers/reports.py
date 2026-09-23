@@ -1,6 +1,7 @@
 """Analysis reports: read the active (latest PUBLISHED) report + findings."""
 
 from __future__ import annotations
+from spinread.core.access import viewable_video, audit
 
 from typing import Any
 
@@ -43,7 +44,7 @@ def get_active_report(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> ReportOut:
-    video = get_owned_video(video_id, db, user)
+    video = viewable_video(video_id, db, user)
     report = db.scalar(
         select(AnalysisReport)
         .where(AnalysisReport.video_id == video.id, AnalysisReport.state == "PUBLISHED")
