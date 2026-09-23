@@ -332,3 +332,22 @@ class QuizAttempt(Base):
     scored: Mapped[bool] = mapped_column(nullable=False, default=False)
     feedback_version: Mapped[str] = mapped_column(Text, nullable=False, default="observation-1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PracticeWindow(Base):
+    __tablename__ = "practice_windows"
+    __table_args__ = (
+        UniqueConstraint("video_id", "timeline_id", "feature_version", "start_ms"),
+        CheckConstraint("start_ms >= 0 AND end_ms > start_ms"),
+    )
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("pwin"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    timeline_id: Mapped[str] = mapped_column(ForeignKey("timelines.id"), nullable=False)
+    feature_version: Mapped[str] = mapped_column(Text, nullable=False)
+    start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    features: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    label_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    reviews: Mapped[list] = mapped_column(JSON, nullable=False, default=list)

@@ -13,8 +13,10 @@ from sqlalchemy.orm import Session
 from pingpong_training.analysis.serve import DETECTOR_VERSION
 from spinread.api.deps import get_current_user, get_db, get_owned_video
 from spinread.api.errors import ApiError, not_found
-from spinread.core.models import QuizAttempt, QuizGeneration, QuizItem, Timeline, TimelineActivePointer, User, Video
+from spinread.core.models import QuizAttempt, QuizGeneration, QuizItem, Timeline, TimelineActivePointer, User, Video, PracticeWindow, utcnow
 from spinread.core.queue import enqueue
+from spinread.product.practice import practice_context, context_for_contact
+from pingpong_training.analysis.practice import FEATURE_VERSION
 
 router = APIRouter(prefix="/api", tags=["quizzes"])
 
@@ -45,7 +47,7 @@ def owned_item(db, user, item_id):
     return item, video
 
 
-def item_out(db, item, timeline_id, attempted=None):
+def item_out(db, item, timeline_id, attempted=None, context=None):
     stale = item.timeline_id != timeline_id or not item.is_current
     return {
         "id": item.id, "video_id": item.video_id, "version": item.version,
@@ -54,6 +56,7 @@ def item_out(db, item, timeline_id, attempted=None):
         "approval": item.approval, "stale": stale,
         "provenance": item.provenance, "scorable": False,
         "attempted": item.id in (attempted or set()),
+        "practice": context_for_contact(context, item.contact_ms) if context and item.timeline_id == timeline_id else None,
     }
 
 
@@ -68,9 +71,14 @@ def list_items(video_id: str, db: Session = Depends(get_db), user: User = Depend
     items = db.scalars(select(QuizItem).where(QuizItem.video_id == video.id, QuizItem.is_current.is_(True)).order_by(QuizItem.start_ms)).all()
     attempted = set(db.scalars(select(QuizAttempt.quiz_item_id).join(QuizItem).where(QuizItem.video_id == video.id, QuizAttempt.user_id == user.id)))
     generation = db.scalar(select(QuizGeneration).where(QuizGeneration.video_id == video.id, QuizGeneration.timeline_id == tl.id, QuizGeneration.detector_version == DETECTOR_VERSION))
-    return {"video_id": video.id, "filename": video.filename, "duration_ms": video.duration_ms,
+    context = practice_context(db, video.id, tl.id)
+    # A new detector generation supersedes untouched old proposals, never
+    # reviewed revisions, approved items, or their attempt history.
+    if generation and generation.status == "READY":
+        items = [i for i in items if i.generation_id in (None, generation.id) or i.approval != "DRAFT"]
+    return {"practice": context, "video_id": video.id, "filename": video.filename, "duration_ms": video.duration_ms,
             "timeline_version": tl.version, "generation": generation_out(generation),
-            "items": [item_out(db, i, tl.id, attempted) for i in items]}
+            "items": [item_out(db, i, tl.id, attempted, context) for i in items]}
 
 
 @router.post("/videos/{video_id}/quiz-candidates", status_code=202)
@@ -211,3 +219,28 @@ def attempts(item_id: str, db: Session = Depends(get_db), user: User = Depends(g
     rows = db.scalars(select(QuizAttempt).join(QuizItem).where(QuizItem.family_id == item.family_id,
         QuizAttempt.user_id == user.id).order_by(QuizAttempt.created_at.desc()).limit(50)).all()
     return [attempt_out(a) for a in rows]
+
+
+class PracticeReview(BaseModel):
+    timeline_version: int = Field(ge=1)
+    revision: int = Field(ge=1)
+    label: Literal["RALLY", "SERVE_RECEIVE", "OTHER", "UNKNOWN"] | None
+
+
+@router.post("/videos/{video_id}/practice-windows/{window_id}/review")
+def review_practice(video_id: str, window_id: str, body: PracticeReview,
+                    db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    video = get_owned_video(video_id, db, user)
+    lock_video(db, video.id)
+    tl = active(db, video.id)
+    w = db.get(PracticeWindow, window_id)
+    if w is None or w.video_id != video.id:
+        raise not_found("练习上下文不存在")
+    if tl.version != body.timeline_version or w.timeline_id != tl.id or w.feature_version != FEATURE_VERSION or w.revision != body.revision:
+        raise conflict("练习类型或时间线已更新，请刷新后重试")
+    w.reviews = [*w.reviews, {"label": body.label, "source": "USER", "reviewer_id": user.id,
+        "created_at": utcnow().isoformat(), "previous_label": w.label}]
+    w.label, w.label_source = body.label, "USER" if body.label else None
+    w.revision += 1
+    db.flush()
+    return practice_context(db, video.id, tl.id)

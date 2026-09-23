@@ -156,6 +156,7 @@ def test_generator_uses_all_onsets_and_replay_preserves_review(quiz_client, monk
     root.mkdir(parents=True)
     (root / 'original').write_bytes(b'x')
     monkeypatch.setattr(quiz_generation, 'detect_rallies_for_video', lambda *a, **kw: ([], [2000, 2400, 7000, 7500]))
+    monkeypatch.setattr(quiz_generation, 'practice_features', lambda *a: [{'start_ms': 0, 'end_ms': 20000, 'features': [1.] * 12}])
     settings = SimpleNamespace(tmp_dir=str(tmp_path), ffmpeg_bin='ffmpeg', ffprobe_bin='ffprobe')
     with factory() as db:
         job = db.scalar(select(Job).where(Job.kind == 'QUIZ_GENERATE'))
@@ -199,3 +200,69 @@ def test_stale_new_attempt_is_rejected_and_reconfirmation_keeps_history(quiz_cli
     assert revised.status_code == 201
     assert len(c.get('/api/quiz-sets/recommended').json()['items']) == 1
     assert c.get(f"/api/quiz-items/{revised.json()['id']}/attempts").json()[0]['quiz_item_id'] == item['id']
+
+
+def test_practice_reviews_are_private_versioned_and_not_guessed(quiz_client):
+    from spinread.core.models import PracticeWindow
+    from pingpong_training.analysis.practice import FEATURE_VERSION
+    c, factory = quiz_client
+    item = create(c, approval='DRAFT')
+    with factory.begin() as db:
+        db.add(PracticeWindow(id='context', video_id='video', timeline_id='timeline',
+            feature_version=FEATURE_VERSION, start_ms=0, end_ms=20000, features=[1.] * 12))
+    data = c.get('/api/videos/video/quiz-items').json()
+    assert data['items'][0]['practice']['decision']['type'] == 'UNKNOWN'
+    assert data['practice']['model']['ready'] is False
+    path = '/api/videos/video/practice-windows/context/review'
+    body = {'timeline_version': 1, 'revision': 1, 'label': 'RALLY'}
+    assert c.post(path, json=body, headers={'X-Test-User': 'other'}).status_code == 403
+    assert c.post(path, json=body | {'label': 'invalid'}).status_code == 422
+    assert c.post(path, json=body | {'timeline_version': 2}).status_code == 409
+    r = c.post(path, json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()['windows'][0]['decision']['source'] == 'USER'
+    assert c.post(path, json=body).status_code == 409
+    data = c.get('/api/videos/video/quiz-items').json()
+    assert data['items'][0]['practice']['decision']['type'] == 'RALLY'
+    assert data['items'][0]['approval'] == 'DRAFT'
+    assert c.get('/api/quiz-sets/recommended').json()['items'] == []
+    r = c.post(path, json=body | {'revision': 2, 'label': None})
+    assert r.json()['windows'][0]['decision']['type'] == 'UNKNOWN'
+    with factory() as db:
+        assert len(db.get(PracticeWindow, 'context').reviews) == 2
+
+
+def test_context_training_does_not_cross_video_or_timeline(quiz_client):
+    from spinread.core.models import PracticeWindow
+    from pingpong_training.analysis.practice import FEATURE_VERSION
+    from spinread.product.practice import practice_context
+    c, factory = quiz_client
+    with factory.begin() as db:
+        db.add(Video(id='private', owner_id='other', filename='private.mp4', state='READY', duration_ms=200000))
+        db.add(Timeline(id='private-timeline', video_id='private', version=1, state='PUBLISHED'))
+        db.flush()
+        for index in range(9):
+            db.add(PracticeWindow(video_id='private', timeline_id='private-timeline', feature_version=FEATURE_VERSION,
+                start_ms=index*20000, end_ms=(index+1)*20000, features=[float(index)]*12,
+                label=['RALLY', 'SERVE_RECEIVE', 'OTHER'][index//3], label_source='USER'))
+    with factory() as db:
+        assert practice_context(db, 'private', 'private-timeline')['model']['ready'] is True
+        assert practice_context(db, 'video', 'timeline')['model']['ready'] is False
+        assert practice_context(db, 'private', 'timeline')['model']['ready'] is False
+
+
+def test_new_generation_supersedes_proposals_but_preserves_approved_history(quiz_client):
+    from pingpong_training.analysis.serve import DETECTOR_VERSION
+    c, factory = quiz_client
+    approved = create(c)
+    assert attempt(c, approved).status_code == 201
+    with factory.begin() as db:
+        db.add_all([QuizGeneration(id='old-gen', video_id='video', timeline_id='timeline', detector_version='old', status='READY'),
+            QuizGeneration(id='new-gen', video_id='video', timeline_id='timeline', detector_version=DETECTOR_VERSION, status='READY')])
+        db.flush()
+        for gid in ['old-gen', 'new-gen']:
+            db.add(QuizItem(id=gid+'-item', video_id='video', timeline_id='timeline', generation_id=gid,
+                start_ms=1000, contact_ms=2500, pause_ms=3300, end_ms=6000, approval='DRAFT'))
+    ids = [i['id'] for i in c.get('/api/videos/video/quiz-items').json()['items']]
+    assert 'old-gen-item' not in ids and 'new-gen-item' in ids and approved['id'] in ids
+    assert len(c.get(f"/api/quiz-items/{approved['id']}/attempts").json()) == 1

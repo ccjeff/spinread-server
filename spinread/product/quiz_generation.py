@@ -1,12 +1,29 @@
 """Async, repeatable candidate preparation using the full video's onsets."""
 import logging
+import numpy as np
 from dataclasses import asdict
 from pathlib import Path
 
 from sqlalchemy import select
 from pingpong_training.analysis.rally import detect_rallies_for_video
 from pingpong_training.analysis.serve import DETECTOR_VERSION, detect_serve_candidates
-from spinread.core.models import MediaAsset, QuizGeneration, QuizItem, Video
+from spinread.core.models import MediaAsset, QuizGeneration, QuizItem, Video, PracticeWindow
+from pingpong_training.analysis.practice import FEATURE_VERSION, window_features
+from pingpong_training.analysis.motion import extract_gray_frames
+from pingpong_training.pipeline import _load_cache, _save_cache
+
+
+def practice_features(local, work, impacts, duration_ms, settings):
+    meta = {"path": str(local.resolve()), "size": local.stat().st_size, "mtime_ns": local.stat().st_mtime_ns}
+    try:
+        frames = _load_cache(work, "gray_frames", meta)
+        if frames is None:
+            frames, _ = extract_gray_frames(local, ffmpeg_bin=settings.ffmpeg_bin, ffprobe_bin=settings.ffprobe_bin)
+            _save_cache(work, "gray_frames", frames, meta)
+    except Exception:
+        log.exception("practice visual features unavailable; abstaining")
+        frames = np.zeros(0)
+    return window_features(frames, impacts, duration_ms)
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +56,14 @@ def generate_quiz_candidates(session, settings, s3, job):
         _, impacts = detect_rallies_for_video(local, [(0, video.duration_ms)], work_dir=root / "work",
             ffmpeg_bin=settings.ffmpeg_bin, ffprobe_bin=settings.ffprobe_bin)
         candidates = detect_serve_candidates(impacts, video.duration_ms)
+        windows = practice_features(local, root / "work", impacts, video.duration_ms, settings)
+        known = set(session.scalars(select(PracticeWindow.start_ms).where(
+            PracticeWindow.video_id == video.id, PracticeWindow.timeline_id == g.timeline_id,
+            PracticeWindow.feature_version == FEATURE_VERSION)))
+        for w in windows:
+            if w["start_ms"] not in known:
+                session.add(PracticeWindow(video_id=video.id, timeline_id=g.timeline_id,
+                    feature_version=FEATURE_VERSION, **w))
         session.refresh(video)
         if video.deleted_at is not None:
             raise ValueError("视频已不可用")
@@ -51,7 +76,10 @@ def generate_quiz_candidates(session, settings, s3, job):
                 provenance={"source": "MODEL", "source_id": DETECTOR_VERSION,
                     "confidence": None, "boundary_confirmed": False}))
         g.status, g.error = "READY", None
-        g.limitations = ["候选基于声音与静默间隔，可能漏检或误检；不是已确认的发球。", "暂停点为建议位置，请回看片段并确认在接球前暂停；参考答案未核实。"]
+        g.limitations = ["练习类型结合画面运动与击球节奏，用本视频已复核片段训练；小样本分类尚未验证泛化准确率。",
+            "声音只用于提议触球位置；发接发分类不代表每个候选都是发球。仍需确认动作、边界和接球前暂停点。"]
+        if not any(w["features"] for w in windows):
+            g.limitations += ["画面特征不可用，自动类型判断保持不确定；可回看并人工确认。"]
         if not impacts:
             g.limitations += ["未提取到击球信号，可手动圈定片段。"]
         if len(candidates) > 300:
