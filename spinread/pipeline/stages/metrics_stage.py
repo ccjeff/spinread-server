@@ -1,4 +1,4 @@
-"""METRICS stage (metrics-0.1.0): deterministic metrics over the active timeline.
+"""METRICS stage (metrics-0.2.0): deterministic metrics over the active timeline.
 
 Reads the active timeline's items (post-edit versions included), upserts
 metric_values rows keyed by (video, timeline_version, name, version) and
@@ -23,7 +23,7 @@ from spinread.pipeline.stage import StageContext, StageError, StageResult
 
 log = logging.getLogger(__name__)
 
-METRIC_VERSION = "metrics-0.1.0"
+METRIC_VERSION = "metrics-0.2.0"
 
 _RALLY_LEN_BUCKETS = [(0, 5000), (5000, 15000), (15000, 30000), (30000, None)]
 
@@ -70,7 +70,7 @@ class MetricsStage:
         hits_per_rally_map: dict[str, int] = {}
         for h in hits:
             hits_per_rally_map[h.parent_id] = hits_per_rally_map.get(h.parent_id, 0) + 1
-        hpr = list(hits_per_rally_map.values())
+        hpr = [hits_per_rally_map.get(r.id, 0) for r in rallies]
         hits_per_rally = {
             "mean": round(statistics.fmean(hpr), 2) if hpr else 0.0,
             "max": max(hpr) if hpr else 0,

@@ -42,7 +42,7 @@ def _encode_segment(out: Path, video_src: str, audio_src: str) -> None:
 def synthetic_training_video(tmp_path_factory) -> Path:
     """60 s: motion+clicks (0-20 s) / static+silence (20-35 s) / motion+clicks (35-60 s)."""
     work = tmp_path_factory.mktemp("training")
-    clicks = "aevalsrc=exprs='0.6*sin(2*PI*3000*t)*lt(mod(t,2),0.02)':s=16000:d={d}"
+    clicks = "aevalsrc=exprs='0.3*(sin(2*PI*3000*t)+sin(2*PI*6000*t))*lt(mod(t,2),0.005)':s=16000:d={d}"
     seg1 = work / "seg1.mp4"
     _encode_segment(seg1, "testsrc2=size=320x180:rate=30:duration=20", clicks.format(d=20))
     seg2 = work / "seg2.mp4"

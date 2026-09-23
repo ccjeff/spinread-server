@@ -2,7 +2,7 @@
 """Generate sample/session.mp4: a 75 s synthetic training session.
 
 Structure (same pattern as tests/conftest.py):
-  0-25 s   moving content + 3 kHz click every 2 s   (rally-like)
+  0-25 s   moving content + 3+6 kHz short contact impulse every 2 s   (rally-like)
   25-45 s  static frame + silence                     (break / pickup)
   45-75 s  moving content + clicks                    (rally-like)
 """
@@ -40,7 +40,7 @@ def encode_segment(out: Path, video_src: str, audio_src: str) -> None:
 
 def main() -> None:
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    clicks = "aevalsrc=exprs='0.6*sin(2*PI*3000*t)*lt(mod(t,2),0.02)':s=16000:d={d}"
+    clicks = "aevalsrc=exprs='0.3*(sin(2*PI*3000*t)+sin(2*PI*6000*t))*lt(mod(t,2),0.005)':s=16000:d={d}"
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         seg1 = work / "seg1.mp4"

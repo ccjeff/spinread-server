@@ -225,6 +225,13 @@ def apply_timeline_edits(
 
     roots = _load_tree(session, current.id)
     roots = _apply_ops(roots, ops)
+    def recount(node):
+        for child in node.children:
+            recount(child)
+        if node.type == "RALLY":
+            node.attributes["hits"] = sum(c.type == "HIT_CANDIDATE" for c in node.children)
+    for root in roots:
+        recount(root)
     n_items = _validate(roots, video.duration_ms)
 
     new_timeline = Timeline(

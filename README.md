@@ -149,3 +149,7 @@ pytest -q        # 需要 compose 栈已起;全部打真 PG+MinIO+ffmpeg
 ## 训练闭环
 
 迁移到 `0005_training_loop` 后支持球员/教练注册、逐视频授权、评审批注、版本化训练计划和可比性检查后的复测。详见 [训练闭环](docs/training-loop.md) 与 [LLD 实现清单](docs/implementation-status.md)。
+
+## 击球重计数
+
+新分析使用 `rally-racket-0.2.0`，将球拍触球候选与通用音频冲击分离。保留当前分段边界的修复命令：`.venv/bin/python -m scripts.recount_hits VIDEO_ID`（只预览）；加 `--apply --base-version N` 发布新时间线并重算指标/报告。历史保留；旧 quiz 与训练计划按时间线版本规则标为待复核。回合卡片展示估计次数，包含双方触球。边界编辑后同步重算子击球计数，平均击球数包含零候选回合。

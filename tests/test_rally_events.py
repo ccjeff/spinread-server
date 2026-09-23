@@ -26,7 +26,7 @@ def test_rally_and_hit_hierarchy(client, ready_video):
         assert parent["type"] == "RALLY_LIKE"
         assert parent["start_ms"] <= r["start_ms"] <= parent["end_ms"]
         assert r["attributes"]["hits"] >= 3
-        assert r["attributes"]["poc"] == "rally-heuristic-0.1.0"
+        assert r["attributes"]["poc"] == "rally-racket-0.2.0"
 
     hits = [i for i in items if i["type"] == "HIT_CANDIDATE"]
     assert hits, "expected HIT_CANDIDATE items"

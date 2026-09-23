@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from pingpong_training.analysis import detect_rallies_for_video
+from pingpong_training.analysis.rally import STAGE_VERSION
 from pingpong_training.media.probe import FFmpegError
 
 from spinread.pipeline.stage import (
@@ -20,7 +21,7 @@ log = logging.getLogger(__name__)
 
 class RallyStage:
     stage = "RALLY"
-    stage_version = "rally-heuristic-0.1.0"
+    stage_version = STAGE_VERSION
 
     def run(self, ctx: StageContext) -> StageResult:
         activity_art = ctx.prior_artifacts.get("ACTIVITY")
@@ -28,7 +29,7 @@ class RallyStage:
             raise StageError("MISSING_INPUT", "RALLY requires the ACTIVITY artifact")
         activity = ctx.load_artifact_json(activity_art)
 
-        limitations: list[str] = []
+        limitations: list[str] = ["Racket hits are uncalibrated audio estimates; quiet/off-camera contacts may be missed."]
         segments: list[tuple[int, int]] = []
         for item in activity.get("items") or []:
             if promote_item_type(item) == "RALLY_LIKE":
