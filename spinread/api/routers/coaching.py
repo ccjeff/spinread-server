@@ -274,3 +274,49 @@ def cancel_review(request_id: str, body: VersionIn, db: DB, user: Actor, key: Ke
         audit(db, user.id, "REVIEW_CANCELLED", r.id, v.id)
         return review_out(db, r)
     return mutate(db, user, key, f"cancel-review:{request_id}", body.model_dump(), action)
+
+
+@router.get("/coaches/{coach_id}/dashboard")
+def dashboard(coach_id: str, db: DB, user: Actor):
+    """Aggregate only currently shared resources; counts obey the same scope as detail."""
+    from spinread.core.models import AnalysisReport, TrainingPlan, PlanItem, PlanItemRetest
+    require_coach(user)
+    if coach_id != user.id:
+        raise forbidden()
+    relations = db.scalars(select(CoachGrant).where(CoachGrant.coach_id == user.id,
+        CoachGrant.status == "ACTIVE").order_by(CoachGrant.created_at)).all()
+    shared = db.scalars(select(Video).join(ConsentGrant, ConsentGrant.video_id == Video.id)
+        .join(CoachGrant, CoachGrant.player_id == Video.owner_id).where(
+            ConsentGrant.granted_to == user.id, ConsentGrant.purpose == "COACH_VIEW",
+            ConsentGrant.state == "ACTIVE", CoachGrant.coach_id == user.id,
+            CoachGrant.status == "ACTIVE", Video.deleted_at.is_(None)).order_by(Video.created_at.desc())).all()
+    video_ids = {v.id for v in shared}
+    requests = db.scalars(select(ReviewRequest).where(ReviewRequest.coach_id == user.id,
+        ReviewRequest.video_id.in_(video_ids)).order_by(ReviewRequest.created_at)).all()
+    tasks = db.execute(select(PlanItem, AnalysisReport.video_id).join(AnalysisReport,
+        PlanItem.source_report_id == AnalysisReport.id).join(TrainingPlan, PlanItem.plan_id == TrainingPlan.id)
+        .where(AnalysisReport.video_id.in_(video_ids), TrainingPlan.state == "ACTIVE")
+        .order_by(PlanItem.updated_at.desc())).all()
+    task_ids = {item.id for item, _ in tasks}
+    retests = db.scalars(select(PlanItemRetest).where(PlanItemRetest.plan_item_id.in_(task_ids),
+        PlanItemRetest.video_id.in_(video_ids)).order_by(PlanItemRetest.created_at.desc())).all()
+    players = []
+    for relation in relations:
+        player = db.get(User, relation.player_id)
+        videos = [v for v in shared if v.owner_id == player.id]
+        ids = {v.id for v in videos}
+        player_tasks = [item for item, vid in tasks if vid in ids]
+        ids_tasks = {i.id for i in player_tasks}
+        player_retests = [r for r in retests if r.plan_item_id in ids_tasks]
+        reviews = [r for r in requests if r.video_id in ids]
+        players.append({"id": player.id, "name": player.display_name,
+            "videos": [{"id": v.id, "filename": v.filename, "state": v.state, "created_at": v.created_at} for v in videos],
+            "pending_reviews": sum(r.status in ("OPEN", "CLAIMED") for r in reviews),
+            "progress": {state: sum(i.status == state for i in player_tasks) for state in ("ACTIVE", "DONE", "DROPPED")},
+            "tasks": [{"id": i.id, "title": i.title, "status": i.status, "player_note": i.player_note,
+                "updated_at": i.updated_at, "video_id": next(vid for item, vid in tasks if item.id == i.id)} for i in player_tasks],
+            "retests": [{"id": r.id, "task_id": r.plan_item_id, "created_at": r.created_at,
+                "comparable": r.result.get("comparable", False), "success": r.result.get("success")} for r in player_retests]})
+    return {"players": players, "reviews": [review_out(db, r) for r in requests],
+        "summary": {"players": len(players), "pending_reviews": sum(r.status in ("OPEN", "CLAIMED") for r in requests),
+            "active_tasks": sum(i.status == "ACTIVE" for i, _ in tasks), "retests": len(retests)}}

@@ -64,6 +64,7 @@ def get_video(
     video = viewable_video(video_id, db, user)
     return VideoOut(
         **_list_item(video).model_dump(),
+        owner_id=video.owner_id,
         target_player=video.target_player,
         recorded_at=video.recorded_at,
         probe=video.probe,

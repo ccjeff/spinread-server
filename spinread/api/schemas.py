@@ -84,6 +84,7 @@ class VideoListItem(BaseModel):
 
 
 class VideoOut(VideoListItem):
+    owner_id: str
     target_player: dict[str, Any]
     recorded_at: datetime | None
     probe: dict[str, Any] | None

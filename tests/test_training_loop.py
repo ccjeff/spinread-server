@@ -189,3 +189,46 @@ def test_retest_results_require_permission_for_both_videos(loop):
     assert len(c.get('/api'+path, headers=h).json()['items']) == 1
     post(c, '/consents/'+consent['id']+'/revoke', {'base_version': 1})
     assert c.get('/api'+path, headers=h).json()['items'] == []
+
+
+def test_dashboard_scopes_counts_tasks_and_retests_and_revocation(loop):
+    c, factory = loop
+    url = '/api/coaches/coach/dashboard'
+    h = {'X-Test-User': 'coach'}
+    assert c.get(url).status_code == 403
+    assert c.get('/api/coaches/owner/dashboard', headers=h).status_code == 403
+    assert c.get(url, headers=h).json()['players'] == []
+    post(c, '/coach-grants', {'coach_email': 'coach@test.local'})
+    empty = c.get(url, headers=h).json()
+    assert len(empty['players']) == 1 and empty['players'][0]['videos'] == []
+    item = plan(c)
+    _, consent = share(c)
+    req = post(c, '/review-requests', {'video_id': 'video', 'coach_id': 'coach', 'question': 'Help'}).json()
+    post(c, f"/training-plans/{item['plan_id']}/items/{item['id']}/retests", {'base_version': 1, 'video_id': 'retest'})
+    result = c.get(url, headers=h).json()
+    assert result['summary'] == {'players': 1, 'pending_reviews': 1, 'active_tasks': 1, 'retests': 0}
+    assert result['reviews'][0]['id'] == req['id']
+    assert len(result['players'][0]['videos']) == 1
+    share(c, 'retest')
+    assert c.get(url, headers=h).json()['summary']['retests'] == 1
+    post(c, '/consents/'+consent['id']+'/revoke', {'base_version': 1})
+    result = c.get(url, headers=h).json()
+    assert result['summary'] == {'players': 1, 'pending_reviews': 0, 'active_tasks': 0, 'retests': 0}
+    assert result['players'][0]['tasks'] == [] and result['reviews'] == []
+    with factory.begin() as db:
+        db.get(Video, 'retest').deleted_at = utcnow()
+    assert c.get(url, headers=h).json()['players'][0]['videos'] == []
+
+
+def test_dashboard_completed_progress_and_revoked_relationship(loop):
+    c, _ = loop
+    grant, _ = share(c)
+    item = plan(c)
+    path = f"/training-plans/{item['plan_id']}/items/{item['id']}"
+    post(c, path, {'base_version': 1, 'status': 'DONE', 'player_note': 'Two sessions'}, method='PATCH')
+    h = {'X-Test-User': 'coach'}
+    data = c.get('/api/coaches/coach/dashboard', headers=h).json()
+    assert data['players'][0]['progress']['DONE'] == 1
+    assert data['players'][0]['tasks'][0]['player_note'] == 'Two sessions'
+    post(c, '/coach-grants/'+grant['id']+'/revoke', {'base_version': 1})
+    assert c.get('/api/coaches/coach/dashboard', headers=h).json()['players'] == []
