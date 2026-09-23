@@ -277,3 +277,58 @@ class ExportManifest(Base):
     idempotency_hash: Mapped[str] = mapped_column(Text, nullable=False)
     asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class QuizGeneration(Base):
+    __tablename__ = "quiz_generations"
+    __table_args__ = (UniqueConstraint("video_id", "timeline_id", "detector_version"),)
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("qgen"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    timeline_id: Mapped[str] = mapped_column(ForeignKey("timelines.id"), nullable=False)
+    detector_version: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="QUEUED")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    limitations: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class QuizItem(Base):
+    __tablename__ = "quiz_items"
+    __table_args__ = (
+        UniqueConstraint("family_id", "version"),
+        UniqueConstraint("generation_id", "candidate_index"),
+        CheckConstraint("start_ms >= 0 AND start_ms < contact_ms AND contact_ms < pause_ms AND pause_ms < end_ms", name="ck_quiz_bounds"),
+        Index("ix_quiz_video_current", "video_id", "is_current"),
+    )
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("quiz"))
+    family_id: Mapped[str] = mapped_column(Text, nullable=False, default=lambda: new_id("qfam"))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_current: Mapped[bool] = mapped_column(nullable=False, default=True)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    timeline_id: Mapped[str] = mapped_column(ForeignKey("timelines.id"), nullable=False)
+    generation_id: Mapped[str | None] = mapped_column(ForeignKey("quiz_generations.id"), nullable=True)
+    candidate_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    contact_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pause_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    approval: Mapped[str] = mapped_column(Text, nullable=False, default="DRAFT")
+    provenance: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    answer_basis: Mapped[dict] = mapped_column(JSON, nullable=False, default=lambda: {"recommended_confirmed": False, "actual_outcome": "UNKNOWN"})
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class QuizAttempt(Base):
+    __tablename__ = "quiz_attempts"
+    __table_args__ = (UniqueConstraint("user_id", "request_id"),)
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("qat"))
+    quiz_item_id: Mapped[str] = mapped_column(ForeignKey("quiz_items.id"), nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    request_id: Mapped[str] = mapped_column(Text, nullable=False)
+    request_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[dict] = mapped_column(JSON, nullable=False)
+    confidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    elapsed_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    scored: Mapped[bool] = mapped_column(nullable=False, default=False)
+    feedback_version: Mapped[str] = mapped_column(Text, nullable=False, default="observation-1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

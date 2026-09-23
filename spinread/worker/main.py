@@ -127,7 +127,10 @@ def _handle_clip_render(session: Session, settings: Settings, s3, job: Job) -> s
     return "done"
 
 
+from spinread.product.quiz_generation import generate_quiz_candidates
+
 HANDLERS = {
+    "QUIZ_GENERATE": generate_quiz_candidates,
     "PIPELINE_STAGE": _handle_pipeline_stage,
     "FINALIZE_UPLOAD": _handle_finalize_upload,
     "CLIP_RENDER": _handle_clip_render,

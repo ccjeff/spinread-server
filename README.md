@@ -130,10 +130,18 @@ pytest -q        # 需要 compose 栈已起;全部打真 PG+MinIO+ffmpeg
 
 - DAG 为 9 阶段:无 LOCALIZATION/OUTCOME/ADJUDICATION(rally 切分直接由音频撞击间距驱动,HIT actor=null)
 - 报告为确定性指标 + 规则 findings,无 LLM 叙述;无基线对比/复测计划
-- 无 quiz、教练授权、consent 细化
+- 已实现私人观察 quiz（详见下文）；教练授权与 consent 细化仍待实现
 - 媒体下发走**鉴权媒体网关**(HLD §6.3 的备选方案),不发预签名 GET;上传仍用预签名 PUT 直传
 - HLS 单档 720p30(`scale=min(1280,iw)`),无多档自适应、无 contact sheet
 - QUALITY 仅基于 probe 元数据产 HLD §7.2 能力集(无 OpenCV 信号)
 - ACTIVITY/RALLY 复用 POC 算法(`analyze_video`/`detect_rallies_for_video`),metrics/limitations 原样入 artifact
 - 导出只渲染 proxy 档;无审计表、无 Idempotency-Key 头机制、无游标分页、物理删除(CLEANUP)留桩未实现
 - MinIO 镜像用 `quay.io/minio/minio`(docker.io 在部分网络拉不到,二者同上游)
+
+
+## 发球 quiz（私人观察练习）
+
+已接通候选生成、手动圈段、边界确认、练习、不可变版本与答题记录。
+升级需要重新安装相邻 `pingpong-training`、执行 `alembic upgrade head` 并重启 API/worker。
+自动候选需视觉确认；无确认答案的练习一律不计分。
+接口、版本规则、检测限制和验证说明见 [docs/quiz.md](docs/quiz.md)。
