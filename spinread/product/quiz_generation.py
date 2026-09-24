@@ -1,4 +1,4 @@
-"""Async, repeatable candidate preparation using the full video's onsets."""
+"""Async, repeatable candidate preparation using the configured hit detector."""
 import logging
 import numpy as np
 from dataclasses import asdict
@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 from pingpong_training.analysis.rally import detect_rallies_for_video
+from spinread.pipeline.vision import vision_config
 from pingpong_training.analysis.serve import DETECTOR_VERSION, detect_serve_candidates
 from spinread.core.models import MediaAsset, QuizGeneration, QuizItem, Video, PracticeWindow
 from pingpong_training.analysis.practice import FEATURE_VERSION, window_features
@@ -52,9 +53,9 @@ def generate_quiz_candidates(session, settings, s3, job):
             temp = root / f".quiz-{g.id}"
             s3.download_file(original.object_key, str(temp))
             temp.replace(local)
-        # The API also returns ALL impacts even when no rally passes its filters.
+        # Visual mode returns trajectory-supported contacts; legacy mode returns all acoustic impacts.
         _, impacts = detect_rallies_for_video(local, [(0, video.duration_ms)], work_dir=root / "work",
-            ffmpeg_bin=settings.ffmpeg_bin, ffprobe_bin=settings.ffprobe_bin)
+            ffmpeg_bin=settings.ffmpeg_bin, ffprobe_bin=settings.ffprobe_bin, blurball_config=vision_config(settings))
         candidates = detect_serve_candidates(impacts, video.duration_ms)
         windows = practice_features(local, root / "work", impacts, video.duration_ms, settings)
         known = set(session.scalars(select(PracticeWindow.start_ms).where(

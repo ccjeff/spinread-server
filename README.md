@@ -155,3 +155,40 @@ pytest -q        # 需要 compose 栈已起;全部打真 PG+MinIO+ffmpeg
 新分析使用 `rally-racket-0.2.0`，将球拍触球候选与通用音频冲击分离。保留当前分段边界的修复命令：`.venv/bin/python -m scripts.recount_hits VIDEO_ID`（只预览）；加 `--apply --base-version N` 发布新时间线并重算指标/报告。历史保留；旧 quiz 与训练计划按时间线版本规则标为待复核。回合卡片展示估计次数，包含双方触球。边界编辑后同步重算子击球计数，平均击球数包含零候选回合。
 
 当前用户报告只交付训练指标与可靠的训练发现。检测置信度/切分诊断留在内部，旧自动诊断任务从计划视图排除。回合重切可使用 `python -m scripts.resegment_rallies VIDEO_ID` 预览，再加 `--apply --base-version N` 发布新版本；保留上层人工分段及历史，原回合子节点替换为视听联合候选。
+
+## BlurBall visual labeling
+
+Install the optional inference dependencies in the **worker's** environment:
+
+```bash
+.venv/bin/python -m pip install -e '../pingpong-training[vision]'
+```
+
+Download the checkpoint described in
+[pingpong-training's setup guide](https://github.com/ccjeff/pingpong-training/blob/codex/blurball-labeling/docs/blurball-labeling.md).
+Set these in `.env`, using an absolute local checkpoint path, and restart API/worker:
+
+```dotenv
+SPINREAD_BLURBALL_WEIGHTS=/absolute/path/to/blurball_best
+SPINREAD_BLURBALL_DEVICE=auto
+SPINREAD_BLURBALL_BATCH_SIZE=8
+```
+
+New analyses use BlurBall-supported activity/rally/hit labels; quiz candidate
+generation uses the same configured detector. An empty weight setting keeps
+legacy behavior. Invalid configured weights fail instead of silently returning
+audio-only labels. Model identity and event parameters invalidate stage caches.
+
+To relabel an existing video without another media transcode:
+
+```bash
+.venv/bin/python -m scripts.relabel_video VIDEO_ID --base-version 5
+.venv/bin/python -m scripts.relabel_video VIDEO_ID --base-version 5 --apply
+```
+
+The first command is a dry run. This reuses the original's successful PROBE,
+NORMALIZE and QUALITY artifacts, then queues ACTIVITY through REPORT through
+the normal worker. The previous timeline remains stored and active until the
+new timeline is published. Activity intervals, rally children and hit candidates
+are all rebuilt. Existing quiz approvals follow the normal timeline-version
+gate and must be reviewed against the new version.

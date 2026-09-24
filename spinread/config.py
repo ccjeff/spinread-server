@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
 
+    # Explicit opt-in; an invalid configured checkpoint fails rather than silently
+    # falling back to acoustic labels. Install pingpong-training[vision].
+    blurball_weights: str = ""
+    blurball_device: str = "auto"
+    blurball_batch_size: int = 8
+
     max_upload_bytes: int = 4 * 1024 * 1024 * 1024  # 4 GiB
     upload_part_size: int = 16 * 1024 * 1024  # 16 MiB
     presign_expiry_seconds: int = 24 * 3600

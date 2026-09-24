@@ -39,7 +39,7 @@ def promote_item_type(item: dict) -> str:
 
 class TimelineStage:
     stage = "TIMELINE"
-    stage_version = "timeline-build-0.3.0"
+    stage_version = "timeline-build-0.4.0"
 
     def run(self, ctx: StageContext) -> StageResult:
         activity_art = ctx.prior_artifacts.get("ACTIVITY")
@@ -48,11 +48,10 @@ class TimelineStage:
         activity = ctx.load_artifact_json(activity_art)
 
         rally_art = ctx.prior_artifacts.get("RALLY")
-        rallies = (
-            (ctx.load_artifact_json(rally_art).get("rallies") or [])
-            if rally_art is not None
-            else []
-        )
+        rally_payload = ctx.load_artifact_json(rally_art) if rally_art is not None else {}
+        rallies = rally_payload.get("rallies") or []
+        rally_version = rally_payload.get("algorithm_version", STAGE_VERSION)
+        hit_detector = rally_payload.get("hit_detector", RACKET_DETECTOR_VERSION)
         events_art = ctx.prior_artifacts.get("EVENTS")
         events = (
             (ctx.load_artifact_json(events_art).get("events") or [])
@@ -113,12 +112,12 @@ class TimelineStage:
                 end_ms=int(rally["end_ms"]),
                 attributes={
                     "hits": len(rally.get("hits_ms") or []),
-                    "poc": STAGE_VERSION,
-                    "hit_detector": RACKET_DETECTOR_VERSION,
+                    "poc": rally_version,
+                    "hit_detector": hit_detector,
                     "hit_count_estimated": True,
                 },
                 confidence=rally.get("confidence"),
-                provenance={"source": "MODEL", "source_id": STAGE_VERSION},
+                provenance={"source": "MODEL", "source_id": rally_version},
                 status="ACTIVE",
             )
             ctx.session.add(row)
@@ -144,9 +143,9 @@ class TimelineStage:
                 start_ms=start,
                 end_ms=end,
                 actor=None,
-                attributes={"poc": RACKET_DETECTOR_VERSION},
+                attributes={"poc": hit_detector},
                 confidence=None,
-                provenance={"source": "MODEL", "source_id": RACKET_DETECTOR_VERSION},
+                provenance={"source": "MODEL", "source_id": hit_detector},
                 status="ACTIVE",
             )
             ctx.session.add(row)

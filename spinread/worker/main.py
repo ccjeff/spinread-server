@@ -22,6 +22,7 @@ from spinread.pipeline import orchestrator
 from spinread.pipeline.finalize import finalize_upload
 from spinread.pipeline.stage import execute_stage
 from spinread.pipeline.stages import REGISTRY
+from spinread.worker.heartbeat import keep_claim_alive
 
 log = logging.getLogger(__name__)
 
@@ -161,7 +162,8 @@ def run_worker(settings: Settings | None = None, *, once: bool = False, worker_i
             try:
                 if handler is None:
                     raise ValueError(f"no handler for job kind {job.kind}")
-                outcome = handler(session, settings, s3, job)
+                with keep_claim_alive(factory, job.id, worker_id):
+                    outcome = handler(session, settings, s3, job)
                 if outcome == "retry":
                     queue.fail(session, job.id, "stage reported retryable failure", retryable=True)
                 else:

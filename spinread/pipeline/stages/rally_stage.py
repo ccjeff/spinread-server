@@ -6,6 +6,9 @@ import logging
 
 from pingpong_training.analysis import detect_rallies_for_video
 from pingpong_training.analysis.rally import STAGE_VERSION
+from pingpong_training.analysis.audio_onset import RACKET_DETECTOR_VERSION
+from pingpong_training.analysis.visual_events import EVENT_VERSION, RALLY_VERSION
+from spinread.pipeline.vision import vision_config, vision_fingerprint
 from pingpong_training.media.probe import FFmpegError
 
 from spinread.pipeline.stage import (
@@ -21,7 +24,8 @@ log = logging.getLogger(__name__)
 
 class RallyStage:
     stage = "RALLY"
-    stage_version = STAGE_VERSION
+    stage_version = "rally-selectable-1.0.0"
+    cache_fingerprint = staticmethod(vision_fingerprint)
 
     def run(self, ctx: StageContext) -> StageResult:
         activity_art = ctx.prior_artifacts.get("ACTIVITY")
@@ -29,7 +33,8 @@ class RallyStage:
             raise StageError("MISSING_INPUT", "RALLY requires the ACTIVITY artifact")
         activity = ctx.load_artifact_json(activity_art)
 
-        limitations: list[str] = ["Internal: racket audio candidates plus visual motion-reset evidence; not ball tracking."]
+        config = vision_config(ctx.settings)
+        limitations: list[str] = [] if config else ["Internal: racket audio candidates plus visual motion-reset evidence; not ball tracking."]
         segments: list[tuple[int, int]] = []
         for item in activity.get("items") or []:
             if promote_item_type(item) == "RALLY_LIKE":
@@ -46,6 +51,7 @@ class RallyStage:
                     local,
                     segments,
                     work_dir=poc_work,
+                    blurball_config=config,
                     ffmpeg_bin=ctx.settings.ffmpeg_bin,
                     ffprobe_bin=ctx.settings.ffprobe_bin,
                 )
@@ -54,7 +60,7 @@ class RallyStage:
 
             if not impact_times:
                 limitations.append(
-                    "no audio track or no impacts: rally candidates empty"
+                    "no supported contacts: rally candidates empty"
                 )
             seg_of = _segment_indexer(segments)
             for r in rallies:
@@ -74,6 +80,8 @@ class RallyStage:
                 "stage": self.stage,
                 "stage_version": self.stage_version,
                 "video_id": ctx.video.id,
+                "algorithm_version": RALLY_VERSION if config else STAGE_VERSION,
+                "hit_detector": EVENT_VERSION if config else RACKET_DETECTOR_VERSION,
                 "rallies": rallies_payload,
                 "impact_count": len(impact_times),
                 "n_segments": len(segments),
