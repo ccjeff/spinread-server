@@ -467,3 +467,14 @@ class CoachFeedback(Base):
     body: Mapped[str] = mapped_column(Text, nullable=False)
     provenance: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TrainingAnnotationRevision(Base):
+    __tablename__ = "training_annotation_revisions"
+    __table_args__ = (UniqueConstraint("video_id", "version"),)
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("tann"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    segments: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    author_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

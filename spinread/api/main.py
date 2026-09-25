@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 from spinread.api import deps
 from spinread.api.errors import ApiError, api_error_handler, error_body
-from spinread.api.routers import auth, clips, media, reports, timelines, uploads, videos, quizzes, plans, coaching
+from spinread.api.routers import auth, clips, media, reports, timelines, uploads, videos, quizzes, plans, coaching, training_annotations
 from spinread.config import get_settings
 from spinread.core.seed import seed_demo_user
 
@@ -50,6 +50,7 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
     )
 
 
+app.include_router(training_annotations.router)
 app.include_router(auth.router)
 app.include_router(uploads.router)
 app.include_router(videos.router)
