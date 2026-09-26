@@ -5,6 +5,7 @@ new version, switch the pointer, seed a CORRECTION run (METRICS/REPORT only).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -103,9 +104,62 @@ def _clamp_subtree(node: _Node) -> None:
     node.children = kept
 
 
+def _merge_rallies(roots: list[_Node], item_ids: list[str]) -> None:
+    rallies = []
+    def collect(node):
+        if node.type == "RALLY":
+            rallies.append(node)
+        for child in node.children:
+            collect(child)
+    for root in roots:
+        collect(root)
+    rallies.sort(key=lambda n: (n.start_ms, n.end_ms, n.id))
+    selected = set(item_ids)
+    indices = [i for i, node in enumerate(rallies) if node.id in selected]
+    if len(selected) < 2 or len(selected) != len(item_ids) or len(indices) != len(selected):
+        raise EditError("INVALID_RALLY_SELECTION", "select at least two distinct active rallies")
+    if indices != list(range(indices[0], indices[-1] + 1)):
+        raise EditError("NON_ADJACENT_RALLIES", "selected rallies must be adjacent in the full timeline")
+    chosen = [rallies[i] for i in indices]
+    start, end = chosen[0].start_ms, max(n.end_ms for n in chosen)
+    merged = deepcopy(chosen[0])
+    merged.start_ms, merged.end_ms = start, end
+    merged.children = sorted([deepcopy(c) for n in chosen for c in n.children], key=lambda c: c.start_ms)
+    merged.attributes.update(manual_merged=True, hit_count_estimated=True,
+                             merged_from=item_ids)
+    # Replace the full interval, including preparation pauses. Preserve portions
+    # of surrounding activities and their descendants outside that interval.
+    kept = []
+    for root in roots:
+        if root.end_ms <= start or root.start_ms >= end:
+            kept.append(root)
+            continue
+        if root.start_ms < start:
+            left = deepcopy(root)
+            left.end_ms = start
+            _clamp_subtree(left)
+            kept.append(left)
+        if root.end_ms > end:
+            right = deepcopy(root)
+            right.start_ms = end
+            _clamp_subtree(right)
+            kept.append(right)
+    parent = _Node(id="merged:" + merged.id, parent_id=None, type="RALLY_LIKE",
+                   start_ms=start, end_ms=end, actor=merged.actor, attributes={},
+                   confidence=None, provenance={"source": "USER"}, children=[merged])
+    merged.parent_id = parent.id
+    for child in merged.children:
+        child.parent_id = merged.id
+    kept.append(parent)
+    roots[:] = sorted(kept, key=lambda n: n.start_ms)
+
+
 def _apply_ops(roots: list[_Node], ops: list[dict]) -> list[_Node]:
     for op in ops:
         kind = op.get("op")
+        if kind == "MERGE_RALLIES":
+            _merge_rallies(roots, op["timeline_item_ids"])
+            continue
         item_id = op.get("timeline_item_id")
         node, siblings = _find(roots, item_id or "")
         if node is None:
@@ -216,7 +270,9 @@ def apply_timeline_edits(
     session: Session, video: Video, base_timeline_version: int, ops: list[dict]
 ) -> tuple[Timeline, int]:
     """Returns (new timeline, n_items). Raises EditError on validation failure."""
-    pointer = session.get(TimelineActivePointer, video.id)
+    pointer = session.scalar(select(TimelineActivePointer).where(
+        TimelineActivePointer.video_id == video.id
+    ).with_for_update())
     if pointer is None:
         raise EditError("NO_TIMELINE", "video has no active timeline")
     current = session.get(Timeline, pointer.timeline_id)
