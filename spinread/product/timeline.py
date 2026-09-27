@@ -232,6 +232,16 @@ def _apply_ops(roots: list[_Node], ops: list[dict]) -> list[_Node]:
 
         elif kind == "DELETE":
             siblings.remove(node)  # subtree goes with it
+            if node.type == "RALLY" and node.parent_id:
+                parent, parent_siblings = _find(roots, node.parent_id)
+                if parent and parent.type == "RALLY_LIKE" and not any(c.type == "RALLY" for c in parent.children):
+                    # An empty activity wrapper must not reappear as a training
+                    # chapter after its last false rally was removed.
+                    if not parent.children:
+                        parent_siblings.remove(parent)
+                    else:
+                        parent.type = "UNKNOWN"
+                        parent.attributes.pop("impact_count", None)
 
         else:
             raise EditError("UNKNOWN_OP", f"unsupported op {kind!r}")
