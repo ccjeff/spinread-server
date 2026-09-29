@@ -192,3 +192,7 @@ the normal worker. The previous timeline remains stored and active until the
 new timeline is published. Activity intervals, rally children and hit candidates
 are all rebuilt. Existing quiz approvals follow the normal timeline-version
 gate and must be reviewed against the new version.
+
+## 单个训练脉络的 AI 点评
+
+在视频详情选择一个训练脉络，点击“分析本段”。支持本次 API key、后台进度、拼图概览、按需补看和可回放的证据。部署要求、接口和验证见 [chapter-analysis.md](docs/chapter-analysis.md)，完整策略见 [SpinRead LLM strategy](<docs/SpinRead LLM strategy.md>)。

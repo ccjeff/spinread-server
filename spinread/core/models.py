@@ -478,3 +478,31 @@ class TrainingAnnotationRevision(Base):
     segments: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     author_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ChapterAnalysis(Base):
+    __tablename__ = "chapter_analyses"
+    __table_args__ = (
+        UniqueConstraint("video_id", "author_id", "request_key"),
+        CheckConstraint("end_ms > start_ms", name="ck_chapter_analysis_range"),
+        Index("ix_chapter_analyses_video_created", "video_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("cva"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    author_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    chapter_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="QUEUED")
+    request_key: Mapped[str] = mapped_column(Text, nullable=False)
+    request_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    cache_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    budget_micro_usd: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    manifest: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    coverage: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    usage: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
