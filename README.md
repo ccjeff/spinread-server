@@ -195,4 +195,4 @@ gate and must be reviewed against the new version.
 
 ## 单个训练脉络的 AI 点评
 
-在视频详情选择一个训练脉络，点击“分析本段”。支持本次 API key、后台进度、拼图概览、按需补看和可回放的证据。部署要求、接口和验证见 [chapter-analysis.md](docs/chapter-analysis.md)，完整策略见 [SpinRead LLM strategy](<docs/SpinRead LLM strategy.md>)。
+在视频详情选择一个训练脉络，点击“分析本段”。使用服务端凭据，提供后台进度、可回放证据、结构化练习建议和可选的同一球员历史同类训练对比；模型用量与采样诊断仅内部保留。部署要求、接口和验证见 [chapter-analysis.md](docs/chapter-analysis.md)，完整策略见 [SpinRead LLM strategy](<docs/SpinRead LLM strategy.md>)。

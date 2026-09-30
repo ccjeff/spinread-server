@@ -130,7 +130,7 @@ def _handle_clip_render(session: Session, settings: Settings, s3, job: Job) -> s
 
 from spinread.product.quiz_generation import generate_quiz_candidates
 
-from spinread.product.chapter_analysis import run_analysis, purge_expired_keys
+from spinread.product.chapter_analysis import run_analysis
 
 HANDLERS = {
     "CHAPTER_ANALYSIS": run_analysis,
@@ -151,7 +151,6 @@ def run_worker(settings: Settings | None = None, *, once: bool = False, worker_i
     log.info("worker %s started (embed=%s)", worker_id, settings.embed_worker)
 
     while True:
-        purge_expired_keys()
         session = factory()
         try:
             job = queue.claim(session, worker_id)

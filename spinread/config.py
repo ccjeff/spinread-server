@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SPINREAD_", env_file=".env", extra="ignore")
+
+    openai_api_key: SecretStr = Field(default=SecretStr(""), validation_alias=AliasChoices("SPINREAD_OPENAI_API_KEY", "OPENAI_API_KEY"))
 
     db_url: str = "postgresql+psycopg://spinread:spinread@localhost:5432/spinread"
 
