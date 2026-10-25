@@ -131,8 +131,10 @@ def _handle_clip_render(session: Session, settings: Settings, s3, job: Job) -> s
 from spinread.product.quiz_generation import generate_quiz_candidates
 
 from spinread.product.chapter_analysis import run_analysis
+from spinread.product.replay_analysis import run_replay_analysis
 
 HANDLERS = {
+    "REPLAY_ANALYSIS": run_replay_analysis,
     "CHAPTER_ANALYSIS": run_analysis,
     "QUIZ_GENERATE": generate_quiz_candidates,
     "PIPELINE_STAGE": _handle_pipeline_stage,

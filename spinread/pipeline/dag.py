@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-PIPELINE_VERSION = "1.2.0"
+PIPELINE_VERSION = "1.3.0"
 
 # stage -> list of prerequisite stages
 STAGES: dict[str, list[str]] = {

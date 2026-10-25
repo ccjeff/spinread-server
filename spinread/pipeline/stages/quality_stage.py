@@ -1,4 +1,4 @@
-"""QUALITY stage (quality-heuristic-0.1.0, simplified).
+"""QUALITY stage (quality-capabilities-0.2.0, simplified).
 
 Emits the HLD §7.2 capability set derived from the probe artifact only:
 activity segmentation is always SUPPORTED at P0; audio-dependent capabilities
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 
+from spinread.pipeline.vision import vision_config, vision_fingerprint
 from spinread.pipeline.stage import StageContext, StageError, StageResult
 
 log = logging.getLogger(__name__)
@@ -16,7 +17,9 @@ log = logging.getLogger(__name__)
 
 class QualityStage:
     stage = "QUALITY"
-    stage_version = "quality-heuristic-0.1.0"
+    stage_version = "quality-capabilities-0.2.0"
+
+    cache_fingerprint = staticmethod(vision_fingerprint)
 
     def run(self, ctx: StageContext) -> StageResult:
         probe_art = ctx.prior_artifacts.get("PROBE")
@@ -26,16 +29,17 @@ class QualityStage:
         probe = probe_payload.get("probe") or {}
         audio_present = bool(probe.get("audio_present"))
 
+        visual = vision_config(ctx.settings) is not None
         issues: list[dict] = []
         capabilities = {
             "activity_segmentation": "SUPPORTED",
-            "rally_segmentation": "UNSUPPORTED",
-            "hit_candidates": "SUPPORTED" if audio_present else "UNSUPPORTED",
-            "ball_trajectory": "UNSUPPORTED",
+            "rally_segmentation": "CANDIDATE" if visual or audio_present else "UNSUPPORTED",
+            "hit_candidates": "CANDIDATE" if visual or audio_present else "UNSUPPORTED",
+            "ball_trajectory": "PENDING_VISUAL_ANALYSIS" if visual else "UNSUPPORTED",
             "scoreboard_ocr": "NOT_APPLICABLE",
             "spin_classification": "UNSUPPORTED",
         }
-        if not audio_present:
+        if not audio_present and not visual:
             issues.append(
                 {
                     "code": "NO_AUDIO_TRACK",

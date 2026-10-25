@@ -39,7 +39,7 @@ def promote_item_type(item: dict) -> str:
 
 class TimelineStage:
     stage = "TIMELINE"
-    stage_version = "timeline-build-0.4.0"
+    stage_version = "timeline-build-0.5.0"
 
     def run(self, ctx: StageContext) -> StageResult:
         activity_art = ctx.prior_artifacts.get("ACTIVITY")
@@ -115,6 +115,7 @@ class TimelineStage:
                     "poc": rally_version,
                     "hit_detector": hit_detector,
                     "hit_count_estimated": True,
+                    "replay_artifact_id": getattr(events_art, "id", None),
                 },
                 confidence=rally.get("confidence"),
                 provenance={"source": "MODEL", "source_id": rally_version},
@@ -134,8 +135,8 @@ class TimelineStage:
             t_ms = int(event["t_ms"])
             start = max(t_ms, parent.start_ms)
             end = min(t_ms + HIT_INTERVAL_MS, parent.end_ms)
-            if end <= start:
-                end = start + 1  # CHECK end_ms > start_ms
+            if not parent.start_ms <= t_ms < parent.end_ms or end <= start:
+                continue  # Never manufacture an out-of-rally event interval.
             row = TimelineItem(
                 timeline_id=timeline.id,
                 parent_id=parent.id,
@@ -143,7 +144,9 @@ class TimelineStage:
                 start_ms=start,
                 end_ms=end,
                 actor=None,
-                attributes={"poc": hit_detector},
+                attributes={"poc": hit_detector,
+                            "evidence": event.get("evidence", {}),
+                            "visual_supported": event.get("visual_supported", False)},
                 confidence=None,
                 provenance={"source": "MODEL", "source_id": hit_detector},
                 status="ACTIVE",

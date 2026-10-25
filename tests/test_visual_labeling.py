@@ -29,12 +29,17 @@ def test_visual_stages_publish_new_hierarchy_and_preserve_history(quiz_client, t
     seen=[]
     def activity(*a,**kw):seen.append(kw['blurball_config']);return artifact
     def rallies(*a,**kw):seen.append(kw['blurball_config']);return [r],list(r.hits_ms)
+    from spinread.pipeline.stages import events_stage
+    from pingpong_training.analysis.blurball import BallTrack
+    import numpy as np
+    monkeypatch.setattr(events_stage, 'analyze_visual_video', lambda *a, **kw: (
+        analysis, BallTrack(np.array([], dtype=int), np.empty((0,2)), np.array([]), {}), SimpleNamespace(duration_ms=20000)))
     monkeypatch.setattr(activity_stage,'analyze_video',activity)
     monkeypatch.setattr(rally_stage,'detect_rallies_for_video',rallies)
     with factory.begin() as db:
         video=db.get(Video,'video');old=db.get(TimelineActivePointer,'video').timeline_id
         payloads={}
-        ctx=SimpleNamespace(session=db,video=video,settings=Settings(blurball_weights='/configured/model'),
+        ctx=SimpleNamespace(session=db,video=video,settings=Settings(blurball_weights='/configured/model',pose_weights=''),
             ensure_original_local=lambda:(Path('test.mp4'),tmp_path),prior_artifacts={},load_artifact_json=lambda k:payloads[k])
         for stage in [activity_stage.ActivityStage(),rally_stage.RallyStage(),EventsStage()]:
             result=stage.run(ctx);payloads[stage.stage]=result.artifact_json;ctx.prior_artifacts[stage.stage]=stage.stage

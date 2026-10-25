@@ -20,3 +20,12 @@ def vision_fingerprint(settings):
     value = {"model":MODEL_VERSION,"weights":_sha256(config.weights),
              "threshold":config.threshold,"events":EVENT_VERSION,"rules":asdict(VisualEventConfig())}
     return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
+
+
+def replay_fingerprint(settings):
+    from pingpong_training.analysis.pose import POSE_VERSION
+    from pingpong_training.analysis.replay import REPLAY_VERSION
+    value = {"vision": vision_fingerprint(settings), "replay": REPLAY_VERSION,
+             "pose": POSE_VERSION, "pose_fps": getattr(settings, "pose_fps", 12),
+             "pose_weights": _sha256(settings.pose_weights) if getattr(settings, "pose_weights", "") else None}
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()

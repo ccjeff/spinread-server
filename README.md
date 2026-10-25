@@ -196,3 +196,11 @@ gate and must be reviewed against the new version.
 ## 单个训练脉络的 AI 点评
 
 在视频详情选择一个训练脉络，点击“分析本段”。使用服务端凭据，提供后台进度、可回放证据、结构化练习建议和可选的同一球员历史同类训练对比；模型用量与采样诊断仅内部保留。部署要求、接口和验证见 [chapter-analysis.md](docs/chapter-analysis.md)，完整策略见 [SpinRead LLM strategy](<docs/SpinRead LLM strategy.md>)。
+
+## 逐拍、落点与 3D 复盘（2026-10-25）
+
+EVENTS 现在交付可追溯的球路和触球依据，并可运行本地 MediaPipe 姿态模型；前端支持同步骨架、逐拍跳转、四角标定和已确认落点的发接发统计。需要迁移 `0008_replay_reviews`。安装、接口、版本规则和能力边界见 [复盘管线](docs/evidence-replay.md)。
+
+## Pingpong3D 与接发球／教练闭环
+
+支持独立补充分析、NLF41 球台坐标骨架与拟合球路、模型落点统计、提交后的逐拍证据、版本化教练参考答案及训练任务关联。现有视频、时间线、作答、训练与复测记录保留。先安装 `requirements-analysis.txt` 固定的分析库并升级到 `0009_replay_training_bridge`；运行环境、GPU 能力边界和验证结果见 [部署说明](docs/pingpong3d-deployment.md)，接口见 [训练闭环契约](docs/replay-training-bridge.md)。
