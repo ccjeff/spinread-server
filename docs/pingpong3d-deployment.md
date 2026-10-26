@@ -50,7 +50,34 @@ The bridge ingests a scratch copy of the original, scans the video, selects upst
 
 All upstream outputs and its reference-library database are isolated inside the job scratch directory, which is cleaned after completion. This release does not ship a professional-video reference corpus; the upstream similarity library is empty unless a future explicitly configured corpus is provided. It does not import or publish professional footage.
 
-Missing GPU, missing models, required table calibration, timeout and unusable evidence are explicit failures. Fixed-camera upstream recordings may produce placements and body reconstruction without 3D ball trajectories; such runs are partially ready. Current SpinRead 3D renders the reconstructed skeleton and available fitted ball segments; SMPL surface meshes are not loaded or redistributed. Biomechanics cues are model estimates, not measured muscle activation, and preserve upstream quality gates.
+Missing GPU, missing models, required table calibration, timeout and unusable evidence are explicit failures. Fixed-camera upstream recordings may produce placements and body reconstruction without 3D ball trajectories; such runs are partially ready. Biomechanics cues are model estimates, not measured muscle activation, and preserve upstream quality gates.
+
+## Direct local NLF / SMPL mesh engine
+
+The additional `nlf` engine processes the complete original video with an operator-provided NLF TorchScript checkpoint and SMPL topology on a local CUDA GPU. Install the analysis package's `nlf` extra in the worker environment and set:
+
+```dotenv
+SPINREAD_NLF_WEIGHTS=/models/nlf_l.torchscript
+SPINREAD_NLF_FACES=/models/smpl_faces.npy
+SPINREAD_NLF_FPS=12
+SPINREAD_NLF_BATCH_SIZE=4
+```
+
+The replay-analysis status includes `nlf.available` and explicit missing prerequisites. Unavailable execution is rejected before queueing; it does not download models, upload frames to a cloud provider, incur cloud charges, or replace MediaPipe results with mislabeled NLF data. The Mac used for local acceptance has no CUDA, NLF weights, SMPL topology or torchvision, so **real NLF inference has not been executed there**. Player shirt colors are required only by the upstream `pingpong3d` match engine, not this direct `nlf` engine.
+
+Real model outputs contain NLF41 joints and 6,890 SMPL vertices. Meshes are stored as immutable binary chunks of at most two seconds, bound to the source/model hashes and original millisecond clock. The server verifies complete source-time coverage, file hashes and safe paths before publication. The browser loads only the relevant chunks through `GET /api/videos/{video}/replay-mesh/assets/{asset}?timeline_version=V&analysis_artifact_id=A`. That endpoint checks video ownership/coach access, active timeline, analysis scope and the artifact's private asset allowlist. Object-store keys and local paths are not returned to the browser.
+
+The direct API engine currently produces **hip-relative** NLF meshes. The analysis CLI additionally accepts explicitly source-bound camera matrices for table coordinates. A planar landing homography is not automatically promoted to a calibrated NLF camera. The viewer separates hip-relative bodies from the table/ball scene, honors missing frames and camera boundaries, and does not display a surface mesh until real mesh assets exist.
+
+Successful jobs remove temporary files after durable publication. Failed NLF jobs retain a valid `nlf/manifest.json` checkpoint and its derived assets, while removing the downloaded source copy. An operator can resume with the analysis CLI and the original source; a new UI job starts a new request. Do not restart a worker during an active full-video run.
+
+## Experimental ball geometry for existing fixed-camera recordings
+
+`pingpong_training.analysis.ball3d` uses the original BlurBall observations, surviving timeline contacts, explicit calibration windows and candidate bounces to fit conditional piecewise ballistic arcs. This is a separate experimental model, **not** Pingpong3D's validated H solver. Reprojection, observation coverage, bounce consistency, depth conditioning, gravity perturbation and five-pixel corner perturbation are gated. Unaccepted intervals remain gaps; neither spin nor serve/receive classification is inferred. Changing a calibration hides the geometry tied to the old corners.
+
+On the complete 51:27 acceptance recording, 1,677 calibrated contact intervals were inspected. Fifty candidate bounces yielded 100 accepted arcs, totaling 21.972 seconds (0.71% of the recording); the remaining intervals are unavailable. These diagnostics and coverage do not establish real-world 3D accuracy. The original 1,193 landing candidates, 190 rallies, 1,896 contact candidates and 12 fps MediaPipe evidence remain unchanged. No private recording or model files are committed to the repositories.
+
+Appending independent pose/mesh/ball geometry preserves saved landing reviews only when the complete placement inputs have an identical canonical fingerprint. The server records verified artifact ancestry; it does not rewrite the saved review. Changed 2D observations or placements still invalidate the old review binding.
 
 ## API and review workflow
 
@@ -66,9 +93,9 @@ See [API contracts](replay-training-bridge.md) and the analysis repository's `do
 
 ## Validation for this integration
 
-- Analysis library: 106 passed; 2 optional tests skipped.
-- Server: 114 isolated tests passed; 24 live PostgreSQL/MinIO tests deliberately excluded from this run to avoid modifying the user's running store.
+- Analysis library: 129 passed; 1 optional test skipped.
+- Server: 124 isolated tests passed; 24 live PostgreSQL/MinIO tests deliberately excluded from this run to avoid modifying the user's running store.
 - Additive migration test preserves legacy video, quiz attempt, plan and retest rows.
-- Frontend: build, lint and 23 tests; browser flow covers replay, camera rotation, model/confirmed grids, candidate confirmation, multiple camera calibrations, draft generation, post-attempt reveal, coach reference and linked locked task creation.
-- Real 8-second local video: 239 sampled ball frames (74 observed detections), 96 pose frames (92 with people), no inference failures after macOS graphics access was available. These are execution checks, not accuracy benchmarks.
-- NLF/SMPL GPU inference has not been executed on this Mac. Upstream conversion, runner orchestration and API/UI integration use synthetic, source-format fixtures; an operator-provisioned upstream GPU/model runtime remains required for that engine.
+- Frontend: build, lint and 36 tests; browser flow covers replay, camera rotation, mesh binaries and gaps, model/confirmed grids, candidate confirmation, multiple camera calibrations, draft generation, post-attempt reveal, coach reference and linked locked task creation.
+- Complete real-video acceptance: original source/library preserved; all existing MediaPipe observations retained; experimental ball fits checked at multiple source times and excluded after the camera movement.
+- NLF/SMPL GPU inference has not been executed on this Mac. Producer transport, mesh binary rendering, missing-frame behavior and authenticated APIs use isolated synthetic fixtures; those fixtures are never attached to the user's original video.

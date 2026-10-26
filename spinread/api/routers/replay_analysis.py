@@ -27,7 +27,7 @@ class PlayerInput(BaseModel):
 class AnalysisInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     timeline_version: int = Field(ge=1)
-    engine: Literal["local", "pingpong3d"] = "local"
+    engine: Literal["local", "pingpong3d", "nlf"] = "local"
     players: list[PlayerInput] | None = Field(None, min_length=2, max_length=2)
 
     @model_validator(mode="after")
@@ -49,9 +49,10 @@ def active_timeline(db, video, version, lock=False):
 
 
 def output(row, settings):
+    from spinread.product.nlf_analysis import status
     return {"id": row.id if row else None, "state": row.state if row else "NONE",
             "engine": row.engine if row else None, "error_code": row.error_code if row else None,
-            "available_engines": engines(settings)}
+            "available_engines": engines(settings), "nlf": status(settings)}
 
 
 @router.get("/{video_id}/replay-analysis")
@@ -72,6 +73,9 @@ def create_analysis(video_id: str, body: AnalysisInput, db: Session = Depends(ge
     def action():
         db.scalar(select(Video).where(Video.id == video.id).with_for_update())
         timeline = active_timeline(db, video, body.timeline_version, lock=True)
+        if body.engine == "nlf":
+            from spinread.product.nlf_analysis import status
+            status(settings, refresh=True)
         if body.engine not in engines(settings):
             raise ApiError(409, "ANALYSIS_ENGINE_UNAVAILABLE", "该分析引擎尚未配置模型与运行环境。")
         pending = db.scalar(select(ReplayAnalysis).where(ReplayAnalysis.video_id == video.id,

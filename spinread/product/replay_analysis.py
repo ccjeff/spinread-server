@@ -22,6 +22,14 @@ def has_pose(evidence):
                for frame in (evidence.get("pose") or {}).get("frames", []))
 
 
+def placement_fingerprint(evidence):
+    """Only inputs consumed by placement review, excluding independent 3D views."""
+    values = {key: evidence.get(key) for key in
+              ("duration_ms", "frames", "contacts", "strokes", "placements")}
+    return hashlib.sha256(json.dumps(values, sort_keys=True, ensure_ascii=False,
+        allow_nan=False, separators=(",", ":")).encode()).hexdigest()
+
+
 def merge_evidence(base, extra):
     """Merge independently produced modalities without erasing successful ones.
 
@@ -32,10 +40,11 @@ def merge_evidence(base, extra):
         return extra
     result = {**base, **extra}
     provenance = dict(base.get("modality_provenance", {}))
-    fields = ("frames", "pose", "strokes", "placements", "ball_3d", "biomechanics")
+    fields = ("frames", "pose", "mesh", "strokes", "placements", "ball_3d", "biomechanics")
     for key in fields:
         value = extra.get(key)
         usable = (has_pose(extra) if key == "pose" else
+                  bool((value or {}).get("chunks")) if key == "mesh" else
                   bool((value or {}).get("segments")) if key == "ball_3d" else
                   any(f[1] is not None for f in (value or [])) if key == "frames" else bool(value))
         if usable:
@@ -68,10 +77,13 @@ def engines(settings):
         available.append("local")
     if configured(settings):
         available.append("pingpong3d")
+    from spinread.product.nlf_analysis import status
+    if status(settings).get("available"):
+        available.append("nlf")
     return available
 
 
-def analysis_evidence(db, s3, video, timeline_id, cache):
+def analysis_evidence(db, s3, video, timeline_id, cache, *, public=True):
     row = db.scalar(select(ReplayAnalysis).where(ReplayAnalysis.video_id == video.id,
         ReplayAnalysis.timeline_id == timeline_id, ReplayAnalysis.state.in_(["READY", "PARTIAL_READY"]),
         ReplayAnalysis.artifact_id.is_not(None)).order_by(ReplayAnalysis.created_at.desc(), ReplayAnalysis.id.desc()))
@@ -95,7 +107,11 @@ def analysis_evidence(db, s3, video, timeline_id, cache):
                        for r in rows if r.type == "RALLY"]
             evidence = align_pingpong3d_contacts(evidence, rallies)
         cache[key] = evidence
-    return cache[key]
+    evidence = cache[key]
+    if public and evidence.get("mesh"):
+        from spinread.product.nlf_analysis import public_mesh
+        return {**evidence, "mesh": public_mesh(evidence["mesh"], video.id, row.timeline_version, artifact.id)}
+    return evidence
 
 
 def _local(source, work, settings, duration):
@@ -127,13 +143,34 @@ def _local(source, work, settings, duration):
     return evidence, failures
 
 
-def publish_analysis(db, s3, analysis, video, evidence):
+def publish_analysis(db, s3, analysis, video, evidence, *, mesh_assets=None):
     """Publish new immutable bytes and link only this supplemental analysis row."""
     run = db.scalar(select(PipelineRun).where(PipelineRun.video_id == video.id).order_by(PipelineRun.created_at.desc()))
     if run is None:
         raise UpstreamUnavailable("PIPELINE_HISTORY_MISSING")
-    previous = analysis_evidence(db, s3, video, analysis.timeline_id, {})
+    previous = analysis_evidence(db, s3, video, analysis.timeline_id, {}, public=False)
     evidence = merge_evidence(previous, evidence)
+    parent = db.scalar(select(ReplayAnalysis).where(ReplayAnalysis.video_id == video.id,
+        ReplayAnalysis.timeline_id == analysis.timeline_id,
+        ReplayAnalysis.state.in_(["READY", "PARTIAL_READY"]),
+        ReplayAnalysis.artifact_id.is_not(None)).order_by(
+            ReplayAnalysis.created_at.desc(), ReplayAnalysis.id.desc()))
+    parent_artifact = db.get(Artifact, parent.artifact_id) if parent else None
+    # Enriching a separate modality does not change the pixels/events a landing
+    # was reviewed against. Prove this before retaining that review's binding;
+    # never rewrite the user's stored review or accept client-supplied lineage.
+    metrics = {"engine": analysis.engine}
+    if previous and placement_fingerprint(previous) == placement_fingerprint(evidence):
+        artifact = parent_artifact
+        if artifact and artifact.video_id == video.id and artifact.stage == "REPLAY_ANALYSIS":
+            ancestors = (artifact.metrics or {}).get("placement_review_ancestor_ids", [])
+            metrics["placement_review_ancestor_ids"] = list(dict.fromkeys(
+                [artifact.id, *[v for v in ancestors if isinstance(v, str)]]))[:256]
+            metrics["placement_fingerprint"] = placement_fingerprint(evidence)
+    if mesh_assets is not None:
+        metrics["mesh_assets"] = mesh_assets
+    elif previous and evidence.get("mesh") == previous.get("mesh") and parent_artifact:
+        metrics["mesh_assets"] = (parent_artifact.metrics or {}).get("mesh_assets", {})
     payload = {"video_id": video.id, "timeline_id": analysis.timeline_id,
                "timeline_version": analysis.timeline_version, "analysis_id": analysis.id, "replay": evidence}
     data = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
@@ -141,7 +178,7 @@ def publish_analysis(db, s3, analysis, video, evidence):
     s3.put_bytes(key, data, content_type="application/json")
     artifact = Artifact(video_id=video.id, pipeline_run_id=run.id, stage="REPLAY_ANALYSIS",
         stage_version="pingpong3d-bridge-1", object_key=key, content_hash=hashlib.sha256(data).hexdigest(),
-        metrics={"engine": analysis.engine}, limitations=evidence.get("limitations", []))
+        metrics=metrics, limitations=evidence.get("limitations", []))
     db.add(artifact); db.flush()
     analysis.artifact_id = artifact.id
 
@@ -167,7 +204,15 @@ def run_replay_analysis(db, settings, s3, job):
     try:
         s3.download_file(original.object_key, str(source))
         failures = []
-        if analysis.engine == "pingpong3d":
+        mesh_manifest = None
+        if analysis.engine == "nlf":
+            from spinread.product.nlf_analysis import run as run_nlf_evidence
+            evidence, mesh_manifest = run_nlf_evidence(source, root / "nlf", settings,
+                                                       original.content_hash, video.duration_ms)
+            if not has_pose(evidence):
+                failures.append("POSE_NO_DETECTIONS")
+            evidence["analysis_warnings"] = failures
+        elif analysis.engine == "pingpong3d":
             from pingpong_training.analysis.pingpong3d import load_pingpong3d
             rows = db.scalars(select(TimelineItem).where(TimelineItem.timeline_id == analysis.timeline_id,
                 TimelineItem.type == "RALLY", TimelineItem.status == "ACTIVE")).all()
@@ -196,7 +241,11 @@ def run_replay_analysis(db, settings, s3, job):
                              or any(f[1] is not None for f in evidence.get("frames", [])))
             if not available:
                 raise UpstreamUnavailable("NO_USABLE_EVIDENCE")
-            publish_analysis(db, s3, analysis, video, evidence)
+            mesh_assets = None
+            if mesh_manifest and (evidence.get("mesh") or {}).get("chunks"):
+                from spinread.product.nlf_analysis import publish_mesh
+                mesh_assets = publish_mesh(s3, video, analysis, mesh_manifest, root / "nlf")
+            publish_analysis(db, s3, analysis, video, evidence, mesh_assets=mesh_assets)
             analysis.state = "PARTIAL_READY" if failures else "READY"
             analysis.error_code = failures[0] if failures else None
         analysis.updated_at = utcnow(); db.commit()
@@ -209,5 +258,10 @@ def run_replay_analysis(db, settings, s3, job):
         analysis.updated_at = utcnow(); db.commit()
     finally:
         # Only our derived scratch data, never the original object or user records.
-        shutil.rmtree(root, ignore_errors=True)
+        if analysis.engine == 'nlf' and analysis.state == 'FAILED' and (root / 'nlf' / 'manifest.json').is_file():
+            # Operators can resume the hash-bound checkpoint through the NLF CLI.
+            # A new UI job is still a fresh request, not an implicit resume.
+            source.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(root, ignore_errors=True)
     return "done"

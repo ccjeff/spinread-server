@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     pingpong3d_model_dir: str = ""
     pingpong3d_timeout_seconds: int = Field(default=7200, ge=30, le=86400)
     pingpong3d_max_rallies: int = Field(default=80, ge=1, le=200)
+    nlf_weights: str = ""
+    nlf_faces: str = ""
+    nlf_fps: int = Field(default=12, ge=1, le=30)
+    nlf_batch_size: int = Field(default=4, ge=1, le=16)
 
     max_upload_bytes: int = 4 * 1024 * 1024 * 1024  # 4 GiB
     upload_part_size: int = 16 * 1024 * 1024  # 16 MiB

@@ -1,6 +1,7 @@
 """Evidence replay bound to the active timeline, with inherited video access."""
 from __future__ import annotations
 import json
+import hashlib
 from typing import Literal
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -55,7 +56,12 @@ def review_data(db, video, version):
         ReplayAnalysis.state.in_(['READY', 'PARTIAL_READY']), ReplayAnalysis.artifact_id.is_not(None))
         .order_by(ReplayAnalysis.created_at.desc(), ReplayAnalysis.id.desc()).limit(1))
     analysis_id = analysis.artifact_id if analysis else None
-    stale = bool(row and (row.timeline_version != version or row.data.get('analysis_artifact_id') != analysis_id))
+    compatible = {analysis_id}
+    artifact = db.get(Artifact, analysis_id) if analysis_id else None
+    if artifact and artifact.video_id == video.id and artifact.stage == 'REPLAY_ANALYSIS':
+        compatible.update(v for v in (artifact.metrics or {}).get('placement_review_ancestor_ids', [])
+                          if isinstance(v, str))
+    stale = bool(row and (row.timeline_version != version or row.data.get('analysis_artifact_id') not in compatible))
     windows = calibration_windows(row.data if row else {},video.duration_ms)
     return {'version': row.version if row else 0, 'timeline_version': version,
             'stale': stale, 'analysis_artifact_id': analysis_id,
@@ -83,6 +89,7 @@ def evidence_for(db, s3, video, rally, cache):
 
 def rally_evidence(db, s3, video, rally, rows, review, cache):
     evidence, available = evidence_for(db, s3, video, rally, cache)
+    evidence = calibrated_ball_evidence(evidence, review, video.duration_ms)
     hits = [r.start_ms for r in rows if r.parent_id == rally.id and r.type == 'HIT_CANDIDATE']
     window = replay_window(evidence, rally.start_ms, rally.end_ms, hits)
     candidates = [dict(c) for c in window.get('placements', [])]
@@ -103,6 +110,29 @@ def rally_evidence(db, s3, video, rally, rows, review, cache):
         if c['time_ms'] in by_time:
             c.update({k: by_time[c['time_ms']][k] for k in ('status','phase')})
     return evidence, hits, candidates, available
+
+
+def calibrated_ball_evidence(evidence, review, duration):
+    """An edited camera must not display geometry fitted to its previous corners."""
+    ball = evidence.get('ball_3d') or {}
+    if ball.get('provider') != 'SPINREAD_BALLISTIC_EXPERIMENTAL':
+        return evidence
+    hashes = {c['id']:hashlib.sha256(json.dumps(c,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+              for c in calibration_windows(review,duration)}
+    compatible = {c['calibration_id'] for c in ball.get('cameras',[])
+                  if hashes.get(c['calibration_id']) == c.get('calibration_sha256')}
+    segments = [s for s in ball.get('segments',[]) if s.get('calibration_id') in compatible]
+    if len(segments) == len(ball.get('segments',[])):
+        return evidence
+    gaps=[]; cursor=0
+    for segment in sorted(segments,key=lambda s:s['start_ms']):
+        if segment['start_ms']>cursor:
+            gaps.append({'start_ms':cursor,'end_ms':segment['start_ms'],'reason':'CALIBRATION_CHANGED_OR_NO_FIT'})
+        cursor=max(cursor,segment['end_ms'])
+    if cursor<duration:
+        gaps.append({'start_ms':cursor,'end_ms':duration,'reason':'CALIBRATION_CHANGED_OR_NO_FIT'})
+    return {**evidence,'ball_3d':{**ball,'segments':segments,'gaps':gaps,'calibration_stale':True,
+        'limitations':[*ball.get('limitations',[]),'球台标定已修改；旧标定对应的三维球路已隐藏，需要重新计算。']}}
 
 
 def statistics(candidates):
@@ -161,9 +191,7 @@ def get_replay(video_id: str, rally_id: str, timeline_version: int,
     if not start < end <= min(rally.end_ms, start + 30000):
         raise ApiError(422,'INVALID_REPLAY_RANGE','复盘区间必须在当前回合内且不超过 30 秒。')
     result = replay_window(evidence,start,end,hits)
-    pose = evidence.get('pose')
-    result['pose'] = ({**{k:v for k,v in pose.items() if k!='frames'},
-                       'frames':[f for f in pose['frames'] if start<=f['time_ms']<end]} if pose else None)
+    result.setdefault('pose', None)
     return {**result, 'video_id':video_id, 'rally_id':rally_id, 'timeline_version':timeline_version,
             'evidence_available':available, 'rally_start_ms':rally.start_ms,'rally_end_ms':rally.end_ms,
             'next_start_ms':end if end<rally.end_ms else None,
