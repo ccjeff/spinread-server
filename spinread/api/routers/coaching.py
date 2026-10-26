@@ -1,13 +1,13 @@
 """Player-controlled coach relationships, per-video access and review history."""
 from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Header
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from spinread.api.deps import get_current_user, get_db, get_owned_video
 from spinread.api.errors import ApiError, forbidden, not_found
 from spinread.core.models import (User, Video, CoachGrant, ConsentGrant, ReviewRequest,
-    CoachFeedback, Timeline, TimelineItem, TimelineActivePointer, QuizAttempt, QuizItem, utcnow)
+    CoachFeedback, Timeline, TimelineItem, TimelineActivePointer, QuizAttempt, QuizItem, QuizReferenceAnswer, utcnow)
 from spinread.core.access import audit, viewable_video, coach_can_view, require_coach
 from spinread.product.report_policy import public_plan_item
 from spinread.core.mutations import mutate, version_check
@@ -146,13 +146,28 @@ def review_out(db, r, detail=False):
         "version": r.version, "timeline_version": r.timeline_version, "question": r.question,
         "stale": tl is None or tl.version != r.timeline_version, "created_at": r.created_at}
     if detail:
+        from spinread.product.replay_training import rally_for_item, reference_out
+        from spinread.api.routers.replay import review_data
+        current_artifact_id = review_data(db,video,tl.version)['analysis_artifact_id'] if tl else None
         rows = db.scalars(select(CoachFeedback).where(CoachFeedback.review_request_id == r.id).order_by(CoachFeedback.created_at))
         out["feedback"] = [{"id": f.id, "body": f.body, "start_ms": f.start_ms, "end_ms": f.end_ms,
             "timeline_item_id": f.timeline_item_id, "provenance": f.provenance, "created_at": f.created_at} for f in rows]
         attempts = db.execute(select(QuizAttempt, QuizItem).join(QuizItem).where(QuizItem.video_id == video.id,
             QuizAttempt.user_id == video.owner_id).order_by(QuizAttempt.created_at.desc()).limit(50)).all()
-        out["practice_notes"] = [{"start_ms": i.start_ms, "answer": a.answer,
-            "confidence": a.confidence, "created_at": a.created_at} for a, i in attempts]
+        out["practice_notes"] = []
+        for a, i in attempts:
+            rally = rally_for_item(db, i)
+            out["practice_notes"].append({"start_ms":i.start_ms, "contact_ms":i.contact_ms,
+                "pause_ms":i.pause_ms,"end_ms":i.end_ms,"quiz_item_id":i.id,"item_version":i.version,
+                "timeline_version":db.get(Timeline,i.timeline_id).version,
+                "stale":i.timeline_id != (tl.id if tl else None) or not i.is_current,
+                "replay_artifact_id":current_artifact_id if tl and i.timeline_id == tl.id and current_artifact_id
+                    else ((rally.attributes or {}).get('replay_artifact_id') if rally else None),
+                "rally_id":rally.id if rally else None,"answer":a.answer,
+                "confidence":a.confidence,"created_at":a.created_at})
+        out["reference_answers"] = [reference_out(db, a) for a in db.scalars(
+            select(QuizReferenceAnswer).where(QuizReferenceAnswer.review_request_id == r.id)
+            .order_by(QuizReferenceAnswer.created_at.desc(), QuizReferenceAnswer.id.desc()))]
     return out
 
 
@@ -229,6 +244,82 @@ class FeedbackIn(VersionIn):
         if (self.start_ms is None) != (self.end_ms is None) or (self.start_ms is not None and self.end_ms <= self.start_ms):
             raise ValueError("批注需要完整且有序的开始、结束时间")
         return self
+
+
+class ReferenceAnswer(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    spin: Literal['UNKNOWN','TOPSPIN','BACKSPIN','SIDESPIN','SIDE_TOP','SIDE_BACK','NO_SPIN'] = 'UNKNOWN'
+    length: Literal['UNKNOWN','SHORT','HALF_LONG','LONG'] = 'UNKNOWN'
+    acceptable_receives: list[Literal['PUSH','FLICK','TOPSPIN','BLOCK','CHOP']] = Field(default_factory=list,max_length=5)
+    note: str = Field(default='',max_length=4000)
+
+
+class ReferenceEvidence(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    rally_id: str
+    contact_ms: int = Field(ge=0)
+    replay_artifact_id: str | None = None
+
+
+class ReferenceAnswerIn(VersionIn):
+    model_config = ConfigDict(extra='forbid')
+    quiz_item_id: str
+    quiz_item_version: int = Field(ge=1)
+    timeline_version: int = Field(ge=1)
+    answer: ReferenceAnswer
+    evidence: ReferenceEvidence
+    diagnosis: Literal['READING','EXECUTION','MIXED','UNKNOWN'] = 'UNKNOWN'
+
+
+@router.post('/review-requests/{request_id}/quiz-reference-answers')
+def quiz_reference(request_id: str, body: ReferenceAnswerIn, db: DB, user: Actor, key: Key):
+    require_coach(user)
+    review, video = owned_review(db,user,request_id)
+    if review.coach_id != user.id:
+        raise forbidden()
+    def action():
+        if not coach_can_view(db,user,video,lock=True):
+            raise forbidden()
+        db.refresh(review,with_for_update=True)
+        version_check(review.version,body.base_version)
+        if review.status not in ('OPEN','CLAIMED'):
+            raise ApiError(409,'REVIEW_CLOSED','此评审已结束')
+        pointer = db.scalar(select(TimelineActivePointer).where(TimelineActivePointer.video_id == video.id).with_for_update())
+        tl = db.get(Timeline,pointer.timeline_id) if pointer else None
+        item = db.scalar(select(QuizItem).where(QuizItem.id == body.quiz_item_id).with_for_update())
+        if (tl is None or body.timeline_version != tl.version or review.timeline_version != tl.version
+                or item is None or item.video_id != video.id or item.timeline_id != tl.id
+                or not item.is_current or item.version != body.quiz_item_version):
+            raise ApiError(409,'QUIZ_VERSION_CONFLICT','题目、评审或时间线已更新，请刷新后重新核对。')
+        if item.approval != 'APPROVED' or db.scalar(select(QuizAttempt.id).where(
+                QuizAttempt.quiz_item_id == item.id, QuizAttempt.user_id == video.owner_id).limit(1)) is None:
+            raise ApiError(409,'QUIZ_NOT_ATTEMPTED','请先由球员确认片段并提交判断。')
+        rally = db.get(TimelineItem,body.evidence.rally_id)
+        if (rally is None or rally.timeline_id != tl.id or rally.type != 'RALLY' or rally.status != 'ACTIVE'
+                or not rally.start_ms <= item.contact_ms < rally.end_ms
+                or not max(item.start_ms,rally.start_ms) <= body.evidence.contact_ms < min(item.end_ms,rally.end_ms)):
+            raise ApiError(422,'INVALID_REFERENCE_EVIDENCE','证据必须属于这道题的当前回合。')
+        hit = db.scalar(select(TimelineItem.id).where(TimelineItem.timeline_id == tl.id,
+            TimelineItem.parent_id == rally.id,TimelineItem.type == 'HIT_CANDIDATE',
+            TimelineItem.status == 'ACTIVE',TimelineItem.start_ms == body.evidence.contact_ms).limit(1))
+        if hit is None:
+            raise ApiError(422,'INVALID_REFERENCE_EVIDENCE','请选择当前回合中仍有效的逐拍时刻。')
+        previous = db.scalar(select(QuizReferenceAnswer).where(QuizReferenceAnswer.quiz_item_id == item.id,
+            QuizReferenceAnswer.coach_id == user.id).order_by(QuizReferenceAnswer.version.desc()).limit(1))
+        from spinread.api.routers.replay import review_data
+        artifact_id = review_data(db,video,tl.version)['analysis_artifact_id'] or (rally.attributes or {}).get('replay_artifact_id')
+        if body.evidence.replay_artifact_id != artifact_id:
+            raise ApiError(409,'REPLAY_EVIDENCE_CONFLICT','分析证据已更新，请刷新并核对后再确认参考答案。')
+        answer = QuizReferenceAnswer(quiz_item_id=item.id,review_request_id=review.id,coach_id=user.id,
+            version=previous.version+1 if previous else 1,answer=body.answer.model_dump(),diagnosis=body.diagnosis,
+            evidence={**body.evidence.model_dump(),'timeline_id':tl.id,'timeline_version':tl.version,
+                'timeline_hit_id':hit,'replay_artifact_id':artifact_id,
+                'source':'COACH_REVIEW'})
+        db.add(answer);db.flush()
+        review.status,review.version = 'CLAIMED',review.version+1
+        audit(db,user.id,'QUIZ_REFERENCE_CONFIRMED',answer.id,video.id,quiz_item_id=item.id,version=answer.version)
+        return review_out(db,review,detail=True)
+    return mutate(db,user,key,f'quiz-reference:{request_id}',body.model_dump(),action)
 
 
 @router.post("/review-requests/{request_id}/feedback")

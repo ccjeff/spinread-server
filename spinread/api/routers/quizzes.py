@@ -11,9 +11,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from pingpong_training.analysis.serve import DETECTOR_VERSION
-from spinread.api.deps import get_current_user, get_db, get_owned_video
-from spinread.api.errors import ApiError, not_found
-from spinread.core.models import QuizAttempt, QuizGeneration, QuizItem, Timeline, TimelineActivePointer, User, Video, PracticeWindow, utcnow
+from spinread.api.deps import get_current_user, get_db, get_owned_video, get_s3
+from spinread.api.errors import ApiError, forbidden, not_found
+from spinread.core.models import QuizAttempt, QuizGeneration, QuizItem, Timeline, TimelineActivePointer, TimelineItem, User, Video, PracticeWindow, utcnow
+from spinread.core.mutations import mutate
+from spinread.core.access import audit
 from spinread.core.queue import enqueue
 from spinread.product.practice import practice_context, context_for_contact
 from pingpong_training.analysis.practice import FEATURE_VERSION
@@ -132,7 +134,8 @@ def save_item(db, user, video, body, old=None):
         kwargs = {"family_id": old.family_id, "version": old.version + 1}
     item = QuizItem(video_id=video.id, timeline_id=tl.id,
         start_ms=body.start_ms, contact_ms=body.contact_ms, pause_ms=body.pause_ms, end_ms=body.end_ms,
-        approval=body.approval, provenance={"source": "USER", "source_id": user.id,
+        approval=body.approval, provenance={**({k:v for k,v in (old.provenance or {}).items()
+            if k in ('rally_id','replay_artifact_id','candidate_source')} if old else {}), "source": "USER", "source_id": user.id,
             "boundary_confirmed": body.approval == "APPROVED", "previous_item_id": old.id if old else None}, **kwargs)
     db.add(item)
     db.flush()
@@ -185,7 +188,7 @@ def attempt_out(a):
     return {"id": a.id, "quiz_item_id": a.quiz_item_id, "answer": a.answer,
         "confidence": a.confidence, "elapsed_ms": a.elapsed_ms, "scored": a.scored,
         "feedback_version": a.feedback_version, "created_at": a.created_at,
-        "feedback": "判断已记录。观看真实后续，与自己的接法比较；参考答案尚未核实，本题不计分。可将疑问留给教练讨论。"}
+        "feedback": "判断已记录。观看真实后续，与自己的接法比较；模型估计不作为标准答案，本题不计分。可以结合教练参考答案讨论。"}
 
 
 @router.post("/quiz-items/{item_id}/attempts", status_code=201)
@@ -219,6 +222,82 @@ def attempts(item_id: str, db: Session = Depends(get_db), user: User = Depends(g
     rows = db.scalars(select(QuizAttempt).join(QuizItem).where(QuizItem.family_id == item.family_id,
         QuizAttempt.user_id == user.id).order_by(QuizAttempt.created_at.desc()).limit(50)).all()
     return [attempt_out(a) for a in rows]
+
+
+class ReplayCandidatesIn(BaseModel):
+    timeline_version: int = Field(ge=1)
+    rally_ids: list[str] = Field(default_factory=list, max_length=300)
+
+
+@router.post('/videos/{video_id}/replay-quiz-candidates', status_code=201)
+def replay_candidates(video_id: str, body: ReplayCandidatesIn,
+                      idempotency_key: str = Header(min_length=8, max_length=100),
+                      db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    video = get_owned_video(video_id, db, user)
+    def action():
+        lock_video(db, video.id)
+        tl = active(db, video.id)
+        if tl.version != body.timeline_version:
+            raise conflict('时间线已更新，请刷新后生成练习。')
+        if video.state not in ('READY','PARTIAL_READY'):
+            raise ApiError(409, 'VIDEO_NOT_READY', '请等待视频分析完成')
+        rows = db.scalars(select(TimelineItem).where(TimelineItem.timeline_id == tl.id,
+            TimelineItem.status == 'ACTIVE').order_by(TimelineItem.start_ms, TimelineItem.id)).all()
+        rallies = [r for r in rows if r.type == 'RALLY' and (not body.rally_ids or r.id in body.rally_ids)]
+        if body.rally_ids and set(body.rally_ids) != {r.id for r in rallies}:
+            raise ApiError(422,'INVALID_RALLY','请选择当前时间线中的回合。')
+        existing = db.scalars(select(QuizItem).where(QuizItem.video_id == video.id,
+            QuizItem.timeline_id == tl.id, QuizItem.is_current.is_(True))).all()
+        # A repeat request does not replace reviewed boundaries or erase attempts.
+        by_rally = {(i.provenance or {}).get('rally_id'):i for i in existing if (i.provenance or {}).get('rally_id')}
+        items = []; skipped = 0
+        for rally in rallies[:300]:
+            if rally.id in by_rally:
+                items.append(by_rally[rally.id]); continue
+            hits = sorted({r.start_ms for r in rows if r.type == 'HIT_CANDIDATE' and r.parent_id == rally.id
+                           and rally.start_ms <= r.start_ms < rally.end_ms})
+            if len(hits) < 2:
+                skipped += 1; continue
+            contact, receive = hits[:2]
+            start = max(0, contact - 1000)
+            end = min(video.duration_ms or 0, rally.end_ms, start + 30000)
+            pause = contact + (receive - contact) // 2
+            if not start < contact < pause < end:
+                skipped += 1; continue
+            item = QuizItem(video_id=video.id, timeline_id=tl.id, start_ms=start,
+                contact_ms=contact, pause_ms=pause, end_ms=end, approval='DRAFT',
+                provenance={'source':'REPLAY_CANDIDATE','candidate_source':'ACTIVE_TIMELINE_HITS',
+                    'rally_id':rally.id, 'replay_artifact_id':(rally.attributes or {}).get('replay_artifact_id'),
+                    'boundary_confirmed':False, 'serve_confirmed':False})
+            db.add(item); db.flush(); items.append(item)
+        audit(db,user.id,'REPLAY_QUIZ_DRAFTS',video.id,video.id,timeline_version=tl.version,count=len(items))
+        return {'items':[item_out(db,i,tl.id) for i in items], 'skipped_count':skipped,
+                'limitations':['第一板和接球前暂停点需要人工核对；不会自动确认旋转或正确接法。']}
+    return mutate(db,user,idempotency_key,f'replay-quiz-candidates:{video.id}',body.model_dump(),action)
+
+
+@router.get('/quiz-items/{item_id}/evidence')
+def reveal_evidence(item_id: str, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user), s3=Depends(get_s3)):
+    item, video = owned_item(db,user,item_id)
+    attempted = db.scalar(select(QuizAttempt.id).where(QuizAttempt.quiz_item_id == item.id,
+        QuizAttempt.user_id == user.id).limit(1))
+    if attempted is None:
+        raise forbidden('提交这一版本的判断后才能查看回合证据和教练参考答案。')
+    tl = active(db,video.id)
+    if item.timeline_id != tl.id or not item.is_current:
+        raise conflict('题目或时间线已更新；原判断记录仍然保留。')
+    from spinread.product.replay_training import rally_for_item, references
+    from spinread.api.routers.replay import get_replay
+    rally = rally_for_item(db,item)
+    replay = None
+    if rally:
+        start,end = max(item.start_ms,rally.start_ms),min(item.end_ms,rally.end_ms)
+        if start < end:
+            replay = get_replay(video.id,rally.id,tl.version,start,end,db,user,s3)
+            replay['next_start_ms'] = None
+    return {'quiz_item_id':item.id,'item_version':item.version,'timeline_version':tl.version,
+            'rally_id':rally.id if rally else None,'replay':replay,'reference_answers':references(db,item.id)}
 
 
 class PracticeReview(BaseModel):

@@ -54,6 +54,11 @@ class MergeNextOp(BaseModel):
     timeline_item_id: str
 
 
+class MergeRalliesOp(BaseModel):
+    op: Literal["MERGE_RALLIES"]
+    timeline_item_ids: list[str]
+
+
 class DeleteOp(BaseModel):
     op: Literal["DELETE"]
     timeline_item_id: str
@@ -61,7 +66,7 @@ class DeleteOp(BaseModel):
 
 class TimelineEditsRequest(BaseModel):
     base_timeline_version: int
-    operations: list[UpdateBoundaryOp | SetLabelOp | SplitOp | MergeNextOp | DeleteOp]
+    operations: list[UpdateBoundaryOp | SetLabelOp | SplitOp | MergeNextOp | MergeRalliesOp | DeleteOp]
 
 
 class TimelineEditsResponse(BaseModel):

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from spinread.api.deps import get_current_user, get_db, get_owned_video
 from spinread.api.errors import ApiError, forbidden, not_found
 from spinread.core.models import (AnalysisReport, Finding, TrainingPlan, PlanItem,
-    PlanItemRetest, Video, User, utcnow)
+    PlanItemRetest, Video, User, QuizReferenceAnswer, QuizItem, Timeline, utcnow)
 from spinread.core.access import audit, viewable_video, coach_can_view
 from spinread.core.mutations import mutate, version_check
 from spinread.product.report_policy import public_plan_item, public_finding
@@ -52,7 +52,8 @@ def item_out(db, item):
     report = db.get(AnalysisReport, item.source_report_id)
     return {k: getattr(item, k) for k in ("id", "plan_id", "version", "priority", "title", "source_report_id",
         "finding_ids", "drill", "retest", "source", "locked_by_coach", "status", "player_note", "history")} | {
-        "video_id": report.video_id, "baseline_stale": not report_current(db, report)}
+        "video_id": report.video_id, "baseline_stale": not report_current(db, report),
+        "reference_answer_id": item.quiz_reference_answer_id}
 
 
 def plan_out(db, plan, user):
@@ -143,6 +144,7 @@ class NewItem(GenerateIn):
     title: str = Field(min_length=1, max_length=200)
     drill: Drill
     retest: RetestCriteria
+    reference_answer_id: str | None = None
 
 
 @router.post("/training-plans/items")
@@ -154,9 +156,17 @@ def new_item(body: NewItem, db: DB, user: Actor, key: Key):
         db.scalar(select(User).where(User.id == video.owner_id).with_for_update())
         if user.id != video.owner_id and not coach_can_view(db, user, video, lock=True): raise forbidden()
         if not report_current(db, report): raise ApiError(409, "REPORT_STALE", "请使用当前报告")
+        if body.reference_answer_id:
+            reference = db.get(QuizReferenceAnswer,body.reference_answer_id)
+            quiz = db.get(QuizItem,reference.quiz_item_id) if reference else None
+            timeline = db.get(Timeline,quiz.timeline_id) if quiz else None
+            if (quiz is None or quiz.video_id != video.id or not quiz.is_current or timeline is None
+                    or timeline.version != report.timeline_version):
+                raise ApiError(422,'INVALID_REFERENCE_ANSWER','训练任务必须关联此视频当前版本的教练参考答案。')
         plan = ensure_plan(db, video.owner_id, report.id)
         item = PlanItem(plan_id=plan.id, source_report_id=report.id, title=body.title, priority=body.priority,
-            drill=body.drill.model_dump(), retest=body.retest.model_dump(), source="USER" if user.id == video.owner_id else "COACH", locked_by_coach=user.id != video.owner_id)
+            drill=body.drill.model_dump(), retest=body.retest.model_dump(), source="USER" if user.id == video.owner_id else "COACH", locked_by_coach=user.id != video.owner_id,
+            quiz_reference_answer_id=body.reference_answer_id)
         db.add(item); db.flush()
         audit(db, user.id, "PLAN_ITEM_CREATED", item.id, report.video_id)
         return item_out(db, item)

@@ -419,6 +419,7 @@ class PlanItem(Base):
     id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("pi"))
     plan_id: Mapped[str] = mapped_column(ForeignKey("training_plans.id"), nullable=False)
     source_report_id: Mapped[str] = mapped_column(ForeignKey("analysis_reports.id"), nullable=False)
+    quiz_reference_answer_id: Mapped[str | None] = mapped_column(ForeignKey("quiz_reference_answers.id"), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     priority: Mapped[int] = mapped_column(Integer, default=1)
     title: Mapped[str] = mapped_column(Text, nullable=False)
@@ -467,3 +468,84 @@ class CoachFeedback(Base):
     body: Mapped[str] = mapped_column(Text, nullable=False)
     provenance: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TrainingAnnotationRevision(Base):
+    __tablename__ = "training_annotation_revisions"
+    __table_args__ = (UniqueConstraint("video_id", "version"),)
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("tann"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    segments: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    author_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ChapterAnalysis(Base):
+    __tablename__ = "chapter_analyses"
+    __table_args__ = (
+        UniqueConstraint("video_id", "author_id", "request_key"),
+        CheckConstraint("end_ms > start_ms", name="ck_chapter_analysis_range"),
+        Index("ix_chapter_analyses_video_created", "video_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("cva"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    author_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    chapter_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="QUEUED")
+    request_key: Mapped[str] = mapped_column(Text, nullable=False)
+    request_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    cache_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    budget_micro_usd: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    manifest: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    coverage: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    usage: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ReplayReview(Base):
+    """Versioned calibration and human-confirmed landing labels, private per video."""
+    __tablename__ = "replay_reviews"
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    timeline_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    reviewer_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class QuizReferenceAnswer(Base):
+    """Immutable coach guidance for an exact quiz revision and timeline."""
+    __tablename__ = "quiz_reference_answers"
+    __table_args__ = (UniqueConstraint("quiz_item_id", "coach_id", "version"),)
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("qref"))
+    quiz_item_id: Mapped[str] = mapped_column(ForeignKey("quiz_items.id"), nullable=False)
+    review_request_id: Mapped[str] = mapped_column(ForeignKey("review_requests.id"), nullable=False)
+    coach_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    answer: Mapped[dict] = mapped_column(JSON, nullable=False)
+    evidence: Mapped[dict] = mapped_column(JSON, nullable=False)
+    diagnosis: Mapped[str] = mapped_column(Text, nullable=False, default="UNKNOWN")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ReplayAnalysis(Base):
+    """Optional evidence enrichment; never replaces source media or the timeline."""
+    __tablename__ = "replay_analyses"
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("rpa"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    timeline_id: Mapped[str] = mapped_column(ForeignKey("timelines.id"), nullable=False)
+    timeline_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    engine: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="QUEUED")
+    artifact_id: Mapped[str | None] = mapped_column(ForeignKey("artifacts.id"), nullable=True)
+    options: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

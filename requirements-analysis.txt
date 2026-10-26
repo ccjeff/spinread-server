@@ -1,0 +1,2 @@
+# Analysis contract paired with this server integration; model weights excluded.
+pingpong-training @ git+https://github.com/ccjeff/pingpong-training.git@15eb06a3110729ae56e0e158b39af2e6f58bebe3

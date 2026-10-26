@@ -184,6 +184,9 @@ def execute_stage(
     """
     input_hashes, input_ids, prior = _gather_inputs(session, pipeline_run.id, video)
 
+    fingerprint = getattr(stage_impl, "cache_fingerprint", None)
+    if fingerprint is not None:
+        input_hashes.append(fingerprint(settings))
     idem_key = compute_idempotency_key(
         video.id, stage_impl.stage, stage_impl.stage_version, input_hashes
     )

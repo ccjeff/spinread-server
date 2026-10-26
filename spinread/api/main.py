@@ -9,9 +9,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from spinread.api.routers import chapter_analyses, replay, replay_analysis, replay_mesh
 from spinread.api import deps
 from spinread.api.errors import ApiError, api_error_handler, error_body
-from spinread.api.routers import auth, clips, media, reports, timelines, uploads, videos, quizzes, plans, coaching
+from spinread.api.routers import auth, clips, media, reports, timelines, uploads, videos, quizzes, plans, coaching, training_annotations
 from spinread.config import get_settings
 from spinread.core.seed import seed_demo_user
 
@@ -50,6 +51,11 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
     )
 
 
+app.include_router(chapter_analyses.router)
+app.include_router(replay.router)
+app.include_router(replay_analysis.router)
+app.include_router(replay_mesh.router)
+app.include_router(training_annotations.router)
 app.include_router(auth.router)
 app.include_router(uploads.router)
 app.include_router(videos.router)
