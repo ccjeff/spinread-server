@@ -29,6 +29,24 @@ def current(db, video_id, version, lock=False):
     return rows
 
 
+def calibration_windows(data, duration):
+    """Read legacy calibration JSON without changing the stored record."""
+    if 'calibrations' in data:
+        return sorted([dict(c) for c in data['calibrations']], key=lambda c:(c['start_ms'],c['id']))
+    if data.get('corners'):
+        return [{'id':'legacy','corners':data['corners'],
+                 'start_ms':data.get('calibration_start_ms',0),
+                 'end_ms':data.get('calibration_end_ms',duration)}]
+    return []
+
+
+def calibration_legacy_fields(windows, duration):
+    first = windows[0] if windows else None
+    return {'corners':first['corners'] if first else None,
+            'calibration_start_ms':first['start_ms'] if first else 0,
+            'calibration_end_ms':first['end_ms'] if first else duration}
+
+
 def review_data(db, video, version):
     row = db.get(ReplayReview, video.id)
     pointer = db.get(TimelineActivePointer, video.id)
@@ -38,11 +56,10 @@ def review_data(db, video, version):
         .order_by(ReplayAnalysis.created_at.desc(), ReplayAnalysis.id.desc()).limit(1))
     analysis_id = analysis.artifact_id if analysis else None
     stale = bool(row and (row.timeline_version != version or row.data.get('analysis_artifact_id') != analysis_id))
+    windows = calibration_windows(row.data if row else {},video.duration_ms)
     return {'version': row.version if row else 0, 'timeline_version': version,
             'stale': stale, 'analysis_artifact_id': analysis_id,
-            'corners': row.data.get('corners') if row else None,
-            'calibration_start_ms': row.data.get('calibration_start_ms', 0) if row else 0,
-            'calibration_end_ms': row.data.get('calibration_end_ms', video.duration_ms) if row else video.duration_ms,
+            'calibrations':windows, **calibration_legacy_fields(windows,video.duration_ms),
             'reviews': row.data.get('reviews', []) if row and not stale else []}
 
 
@@ -69,11 +86,17 @@ def rally_evidence(db, s3, video, rally, rows, review, cache):
     hits = [r.start_ms for r in rows if r.parent_id == rally.id and r.type == 'HIT_CANDIDATE']
     window = replay_window(evidence, rally.start_ms, rally.end_ms, hits)
     candidates = [dict(c) for c in window.get('placements', [])]
-    if review['corners']:
-        local = placement_candidates(window['frames'], window['contacts'], review['corners'])
-        candidates.extend(c for c in local
-            if review['calibration_start_ms'] <= c['time_ms'] < review['calibration_end_ms']
-            and not any(abs(c['time_ms'] - auto['time_ms']) < 120 for auto in candidates))
+    for calibration in calibration_windows(review,video.duration_ms):
+        start,end = max(rally.start_ms,calibration['start_ms']),min(rally.end_ms,calibration['end_ms'])
+        if start >= end:
+            continue
+        # The detector's full five-frame neighborhood and bracketing active hits
+        # must stay inside one camera window, not merely the candidate's center.
+        frames = [f for f in window['frames'] if start <= f[0] < end]
+        contacts = [c for c in window['contacts'] if start <= c['time_ms'] < end]
+        local = placement_candidates(frames,contacts,calibration['corners'])
+        candidates.extend({**c,'calibration_id':calibration['id']} for c in local
+            if not any(abs(c['time_ms'] - auto['time_ms']) < 120 for auto in candidates))
     by_time = {r['time_ms']: r for r in review['reviews'] if r['rally_id'] == rally.id}
     for c in candidates:
         c['rally_id'] = rally.id
@@ -102,6 +125,21 @@ def statistics(candidates):
                          'unknown_count':sum(not known(c) for c in selected), 'grid':grid}
     result['model_estimates'] = {'sample_count':sum(known(c) for c in estimates),
                                 'unknown_count':sum(not known(c) for c in estimates), 'phases':phases}
+    # Local calibrated candidates have usable positions but no inferred phase.
+    # Keep the existing phase-specific denominators and expose a separate total.
+    def aggregate(rows):
+        grid = [[0]*3 for _ in range(3)]
+        for c in rows:
+            grid[('SHORT','HALF_LONG','LONG').index(c['depth'])][('LEFT','CENTER','RIGHT').index(c['lateral'])] += 1
+        return {'sample_count':len(rows), 'grid':grid}
+    all_estimates = [c for c in complete if c['status'] != 'REJECTED']
+    confirmed = [c for c in complete if c['status'] == 'CONFIRMED'
+                 and c.get('phase') in ('SERVE','RECEIVE','RALLY')]
+    unclassified = sum(c.get('phase', 'UNKNOWN') == 'UNKNOWN' for c in all_estimates)
+    result['all_placements'] = aggregate(confirmed)
+    result['unclassified_count'] = unclassified
+    result['model_estimates']['all_placements'] = aggregate(all_estimates)
+    result['model_estimates']['unclassified_count'] = unclassified
     return result
 
 
@@ -153,14 +191,23 @@ class LandingReview(BaseModel):
     status: Literal['CONFIRMED','REJECTED']
 
 
+class CalibrationWindow(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    id: str = Field(min_length=1,max_length=128)
+    corners: list[tuple[float,float]] = Field(min_length=4,max_length=4)
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+
+
 class ReviewRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     base_version: int = Field(ge=0)
     timeline_version: int = Field(ge=1)
     analysis_artifact_id: str | None = None
+    calibrations: list[CalibrationWindow] | None = Field(default=None,max_length=100)
     corners: list[tuple[float,float]] | None = Field(default=None,min_length=4,max_length=4)
-    calibration_start_ms: int = Field(ge=0)
-    calibration_end_ms: int = Field(gt=0)
+    calibration_start_ms: int = Field(default=0,ge=0)
+    calibration_end_ms: int | None = Field(default=None,gt=0)
     fixed_camera: Literal[True] | None = None
     reviews: list[LandingReview] = Field(default_factory=list,max_length=2000)
 
@@ -176,35 +223,71 @@ def put_review(video_id: str, body: ReviewRequest, db: Session = Depends(get_db)
     previous=db.get(ReplayReview,video_id)
     if (previous.version if previous else 0)!=body.base_version:
         raise ApiError(409,'REPLAY_REVIEW_CONFLICT','复核记录已更新，请刷新后重试。')
-    if body.analysis_artifact_id != review_data(db, video, body.timeline_version)['analysis_artifact_id']:
+    current_review = review_data(db,video,body.timeline_version)
+    if body.analysis_artifact_id != current_review['analysis_artifact_id']:
         raise ApiError(409,'REPLAY_EVIDENCE_CONFLICT','分析证据已更新，请刷新后重新复核。')
-    if body.corners is not None:
-        if body.fixed_camera is not True:
-            raise ApiError(422,'INVALID_CALIBRATION','手动球台标定必须确认机位固定。')
+    old_windows = current_review['calibrations']
+    if body.calibrations is not None:
+        windows = [c.model_dump(mode='json') for c in body.calibrations]
+    elif {'corners','calibration_start_ms','calibration_end_ms'} & body.model_fields_set:
+        # A legacy client edits only the mirrored first window. Other cameras
+        # remain intact even when the client cannot represent the new list.
+        first = old_windows[0] if old_windows else None
+        corners = body.corners if 'corners' in body.model_fields_set else first['corners'] if first else None
+        corners = [list(point) for point in corners] if corners is not None else None
+        start = body.calibration_start_ms if 'calibration_start_ms' in body.model_fields_set else first['start_ms'] if first else 0
+        end = body.calibration_end_ms if body.calibration_end_ms is not None else first['end_ms'] if first else video.duration_ms
+        if not 0 <= start < end <= video.duration_ms:
+            raise ApiError(422,'INVALID_CALIBRATION_RANGE','标定区间超出原视频。')
+        windows = ([{'id':first['id'] if first else 'legacy','corners':corners,
+                    'start_ms':start,'end_ms':end}] if corners is not None else []) + old_windows[1:]
+    else:
+        windows = old_windows
+    windows = sorted(windows,key=lambda c:(c['start_ms'],c['id']))
+    if len({c['id'] for c in windows}) != len(windows):
+        raise ApiError(422,'DUPLICATE_CALIBRATION_ID','标定区间的标识不能重复。')
+    for index,calibration in enumerate(windows):
+        if not 0 <= calibration['start_ms'] < calibration['end_ms'] <= video.duration_ms:
+            raise ApiError(422,'INVALID_CALIBRATION_RANGE','标定区间超出原视频。')
+        if index and windows[index-1]['end_ms'] > calibration['start_ms']:
+            raise ApiError(422,'CALIBRATION_OVERLAP','不同机位的标定区间不能重叠。')
         try:
-            table_homography(body.corners)
+            table_homography(calibration['corners'])
         except ValueError as exc:
             raise ApiError(422,'INVALID_CALIBRATION',str(exc))
-    if not 0<=body.calibration_start_ms<body.calibration_end_ms<=video.duration_ms:
-        raise ApiError(422,'INVALID_CALIBRATION_RANGE','标定区间超出原视频。')
-    data=body.model_dump(mode='json',exclude={'base_version','timeline_version','fixed_camera'})
-    # Recalibration invalidates previous landing confirmations. Clients must
-    # submit an empty review list when changing camera geometry or interval.
-    if previous and body.reviews and any(previous.data.get(k)!=data[k] for k in
-            ('corners','calibration_start_ms','calibration_end_ms')):
-        raise ApiError(422,'CALIBRATION_CHANGED','重新标定后请重新确认落点。')
+    old_by_id,new_by_id = {c['id']:c for c in old_windows},{c['id']:c for c in windows}
+    changed = {key for key in old_by_id.keys() | new_by_id.keys() if old_by_id.get(key) != new_by_id.get(key)}
+    if any(key in new_by_id for key in changed) and body.fixed_camera is not True:
+        raise ApiError(422,'INVALID_CALIBRATION','新增或修改标定时必须确认区间内机位固定。')
+    affected = [c for key in changed for c in (old_by_id.get(key),new_by_id.get(key)) if c]
+    is_affected = lambda r:any(c['start_ms'] <= r['time_ms'] < c['end_ms'] for c in affected)
+    requested = [r.model_dump(mode='json') for r in body.reviews]
+    if len({(r['rally_id'],r['time_ms']) for r in requested}) != len(requested):
+        raise ApiError(422,'INVALID_LANDING_REVIEW','同一落点不能重复提交复核。')
+    if previous and any(is_affected(r) for r in requested):
+        raise ApiError(422,'CALIBRATION_CHANGED','请清除变更区间内的落点复核；其他机位的复核会保留。')
+    # Preserve unrelated confirmations even if a calibration editor sends no
+    # reviews. An analysis/timeline change must never revive stale reviews.
+    preserved = {(r['rally_id'],r['time_ms']):r for r in current_review['reviews'] if not is_affected(r)}
+    for review in requested:
+        preserved[(review['rally_id'],review['time_ms'])] = review
+    reviews = sorted(preserved.values(),key=lambda r:(r['rally_id'],r['time_ms']))
+    if len(reviews) > 2000:
+        raise ApiError(422,'TOO_MANY_LANDING_REVIEWS','单个视频最多保存 2000 条落点复核。')
+    data = {'analysis_artifact_id':body.analysis_artifact_id,'calibrations':windows,
+            **calibration_legacy_fields(windows,video.duration_ms),'reviews':reviews}
     available={};cache={}
     draft={**data,'reviews':[]}
-    wanted={r.rally_id for r in body.reviews}
+    wanted={r['rally_id'] for r in reviews}
     for rally in rows:
         if rally.type=='RALLY' and rally.id in wanted:
             for c in rally_evidence(db,s3,video,rally,rows,draft,cache)[2]:
                 available[(rally.id,c['time_ms'])]=c
     seen=set()
-    for review in body.reviews:
-        key=(review.rally_id,review.time_ms)
-        if (key not in available or key in seen or (review.status=='CONFIRMED' and
-                (review.phase=='UNKNOWN' or available[key].get('table_xy') is None
+    for review in reviews:
+        key=(review['rally_id'],review['time_ms'])
+        if (key not in available or key in seen or (review['status']=='CONFIRMED' and
+                (review['phase']=='UNKNOWN' or available[key].get('table_xy') is None
                  or available[key].get('depth') not in ('SHORT','HALF_LONG','LONG')
                  or available[key].get('lateral') not in ('LEFT','CENTER','RIGHT')))):
             raise ApiError(422,'INVALID_LANDING_REVIEW','请选择当前回合中有视觉依据的落点，并确认所属阶段。')

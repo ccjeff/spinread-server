@@ -58,6 +58,7 @@ Missing GPU, missing models, required table calibration, timeout and unusable ev
 - `POST /api/videos/{video}/replay-analysis` with `Idempotency-Key` and `{timeline_version,engine,players?}` queues owner-only enrichment. Authorized coaches can inspect results but cannot start jobs or alter source calibration.
 - Replay responses remain bounded to 30 seconds; every new modality is clipped to the requested interval.
 - Automatic placements and confirmed placements have separate denominators; unknown or partial positions are excluded from complete grids.
+- The default all-placement view includes local calibrated candidates even when their serve/receive/rally phase is unknown. Phase-specific counts do not guess classifications from those positions. Each video can retain multiple non-overlapping camera calibration windows; observations outside them remain uncalibrated.
 - Generate replay quiz drafts, review their boundaries and approve them. Evidence and reference answers are revealed in practice only after an attempt of that exact quiz revision.
 - A coach reference is immutable, versioned and bound to an active hit and evidence artifact. Training tasks retain its id. Existing consent revocation, coach locks and retest comparability rules still apply.
 
@@ -66,8 +67,8 @@ See [API contracts](replay-training-bridge.md) and the analysis repository's `do
 ## Validation for this integration
 
 - Analysis library: 106 passed; 2 optional tests skipped.
-- Server: 101 isolated tests passed; 24 live PostgreSQL/MinIO tests deliberately excluded from this run to avoid modifying the user's running store.
+- Server: 114 isolated tests passed; 24 live PostgreSQL/MinIO tests deliberately excluded from this run to avoid modifying the user's running store.
 - Additive migration test preserves legacy video, quiz attempt, plan and retest rows.
-- Frontend: build, lint and 16 tests; browser flow covers replay, camera rotation, model/confirmed grids, candidate confirmation, draft generation, post-attempt reveal, coach reference and linked locked task creation.
+- Frontend: build, lint and 23 tests; browser flow covers replay, camera rotation, model/confirmed grids, candidate confirmation, multiple camera calibrations, draft generation, post-attempt reveal, coach reference and linked locked task creation.
 - Real 8-second local video: 239 sampled ball frames (74 observed detections), 96 pose frames (92 with people), no inference failures after macOS graphics access was available. These are execution checks, not accuracy benchmarks.
 - NLF/SMPL GPU inference has not been executed on this Mac. Upstream conversion, runner orchestration and API/UI integration use synthetic, source-format fixtures; an operator-provisioned upstream GPU/model runtime remains required for that engine.

@@ -188,6 +188,31 @@ def test_auto_landing_statistics_are_separate_and_unknowns_excluded(bridge):
     assert stats['confirmed_count']==1 and stats['phases']['SERVE']['sample_count']==1
 
 
+def test_all_placements_counts_local_unknown_without_guessing_phase(bridge):
+    c,_,_=bridge
+    from test_replay import BODY
+    assert c.put('/api/videos/video/replay-review',json=BODY).status_code==200
+    path='/api/videos/video/replay-statistics?timeline_version=1'
+    stats=c.get(path).json()
+    assert stats['all_placements']['sample_count']==0
+    assert stats['model_estimates']['all_placements']['sample_count']==1
+    assert sum(map(sum,stats['model_estimates']['all_placements']['grid']))==1
+    assert stats['unclassified_count']==stats['model_estimates']['unclassified_count']==1
+    assert all(p['sample_count']==0 for p in stats['phases'].values())
+    assert all(p['sample_count']==0 for p in stats['model_estimates']['phases'].values())
+    landing={'rally_id':'rally','time_ms':266,'phase':'RECEIVE','status':'CONFIRMED'}
+    assert c.put('/api/videos/video/replay-review',json=BODY|{'base_version':1,'reviews':[landing]}).status_code==200
+    stats=c.get(path).json()
+    assert stats['all_placements']['sample_count']==stats['phases']['RECEIVE']['sample_count']==1
+    assert stats['model_estimates']['all_placements']['sample_count']==1
+    assert stats['unclassified_count']==0
+    assert stats['model_estimates']['phases']['RECEIVE']['sample_count']==0
+    assert c.put('/api/videos/video/replay-review',json=BODY|{'base_version':2,
+        'reviews':[{**landing,'status':'REJECTED'}]}).status_code==200
+    stats=c.get(path).json()
+    assert stats['all_placements']['sample_count']==stats['model_estimates']['all_placements']['sample_count']==0
+
+
 def test_reanalysis_invalidates_confirmations_without_deleting_them(bridge):
     c,factory,_=bridge
     from test_replay import BODY
