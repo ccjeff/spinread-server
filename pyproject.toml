@@ -18,12 +18,13 @@ dependencies = [
     "pyjwt>=2.8",
     "pydantic>=2",
     "pydantic-settings>=2",
-    "numpy",
-    "opencv-python>=4.10",
+    "numpy>=1.26,<2",
+    "opencv-python-headless>=4.10,<4.12",
     "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
+remote = ["modal>=1.0,<2"]
 test = [
     "pytest>=8",
     "httpx>=0.27",

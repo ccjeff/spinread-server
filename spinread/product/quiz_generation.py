@@ -29,6 +29,13 @@ def practice_features(local, work, impacts, duration_ms, settings):
 log = logging.getLogger(__name__)
 
 
+def compute_candidates(local, root, duration_ms, settings):
+    _, impacts = detect_rallies_for_video(local, [(0, duration_ms)], work_dir=root / "work",
+        ffmpeg_bin=settings.ffmpeg_bin, ffprobe_bin=settings.ffprobe_bin, blurball_config=vision_config(settings))
+    return (detect_serve_candidates(impacts, duration_ms),
+            practice_features(local, root / "work", impacts, duration_ms, settings), impacts)
+
+
 def generate_quiz_candidates(session, settings, s3, job):
     g = session.scalar(select(QuizGeneration).where(QuizGeneration.id == job.payload["generation_id"]).with_for_update())
     if g is None or g.status == "READY":
@@ -49,15 +56,16 @@ def generate_quiz_candidates(session, settings, s3, job):
         root = Path(settings.tmp_dir) / "cache" / original.content_hash
         root.mkdir(parents=True, exist_ok=True)
         local = root / "original"
-        if not local.exists():
+        if not session.info.get("remote_client") and not local.exists():
             temp = root / f".quiz-{g.id}"
             s3.download_file(original.object_key, str(temp))
             temp.replace(local)
         # Visual mode returns trajectory-supported contacts; legacy mode returns all acoustic impacts.
-        _, impacts = detect_rallies_for_video(local, [(0, video.duration_ms)], work_dir=root / "work",
-            ffmpeg_bin=settings.ffmpeg_bin, ffprobe_bin=settings.ffprobe_bin, blurball_config=vision_config(settings))
-        candidates = detect_serve_candidates(impacts, video.duration_ms)
-        windows = practice_features(local, root / "work", impacts, video.duration_ms, settings)
+        if session.info.get("remote_client"):
+            from spinread.remote.bridge import quiz
+            candidates, windows, impacts = quiz(session, settings, video, original, g, root)
+        else:
+            candidates, windows, impacts = compute_candidates(local, root, video.duration_ms, settings)
         known = set(session.scalars(select(PracticeWindow.start_ms).where(
             PracticeWindow.video_id == video.id, PracticeWindow.timeline_id == g.timeline_id,
             PracticeWindow.feature_version == FEATURE_VERSION)))
@@ -86,7 +94,10 @@ def generate_quiz_candidates(session, settings, s3, job):
         if len(candidates) > 300:
             g.limitations += [f"共找到 {len(candidates)} 条候选，本次保留前 300 条；其余可手动补充。"]
         session.commit()
-    except Exception:
+    except Exception as exc:
+        from spinread.remote.provider import RemotePending, LeaseLost
+        if isinstance(exc, (RemotePending, LeaseLost)):
+            raise
         log.exception("quiz generation failed: %s", generation_id)
         session.rollback()
         g = session.get(QuizGeneration, generation_id)

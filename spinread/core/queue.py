@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 from sqlalchemy.orm import Session
 
 from spinread.core.ids import new_id
@@ -36,7 +36,7 @@ def enqueue(
     return job
 
 
-def claim(session: Session, worker_id: str) -> Job | None:
+def claim(session: Session, worker_id: str, *, kinds: list[str] | None = None) -> Job | None:
     """Atomically claim one due job. Uses SELECT ... FOR UPDATE SKIP LOCKED."""
     sql = text(
         """
@@ -46,6 +46,8 @@ def claim(session: Session, worker_id: str) -> Job | None:
             SELECT id FROM jobs
             WHERE done_at IS NULL
               AND run_at <= now()
+              AND attempts < max_attempts
+              AND (:all_kinds OR kind IN :kinds)
               AND (claimed_at IS NULL OR claimed_at < now() - CAST(:stale AS interval))
             ORDER BY priority, run_at
             FOR UPDATE SKIP LOCKED
@@ -53,17 +55,18 @@ def claim(session: Session, worker_id: str) -> Job | None:
         )
         RETURNING id
         """
-    )
+    ).bindparams(bindparam("kinds", expanding=True))
     row = session.execute(
-        sql, {"worker_id": worker_id, "stale": CLAIM_STALE_AFTER}
+        sql, {"worker_id": worker_id, "stale": CLAIM_STALE_AFTER,
+              "all_kinds": kinds is None, "kinds": kinds or [""]}
     ).first()
     if row is None:
         session.commit()  # release the transaction snapshot
         return None
     job = session.get(Job, row[0], populate_existing=True)
-    session.commit()
     if job is not None:
         session.expunge(job)
+    session.commit()
     return job
 
 

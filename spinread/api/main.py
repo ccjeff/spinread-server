@@ -77,13 +77,15 @@ def health() -> dict:
 def startup() -> None:
     logging.basicConfig(level=logging.INFO)
     deps.init_singletons(settings)
-    deps.get_s3().bootstrap()
+    if settings.bootstrap_storage:
+        deps.get_s3().bootstrap()
 
     session_factory = deps._session_factory
     session = session_factory()
     try:
-        seed_demo_user(session)
-        session.commit()
+        if settings.seed_demo:
+            seed_demo_user(session)
+            session.commit()
     finally:
         session.close()
 

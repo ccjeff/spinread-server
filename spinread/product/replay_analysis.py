@@ -72,6 +72,8 @@ def merge_evidence(base, extra):
 
 
 def engines(settings):
+    if settings.remote_provider == "modal":
+        return list(settings.remote_replay_engines)
     available = []
     if any(path and Path(path).is_file() for path in (settings.blurball_weights, settings.pose_weights)):
         available.append("local")
@@ -202,10 +204,14 @@ def run_replay_analysis(db, settings, s3, job):
     root.mkdir(parents=True, exist_ok=True)
     source = root / "original.video"
     try:
-        s3.download_file(original.object_key, str(source))
+        if not db.info.get("remote_client"):
+            s3.download_file(original.object_key, str(source))
         failures = []
         mesh_manifest = None
-        if analysis.engine == "nlf":
+        if db.info.get("remote_client"):
+            from spinread.remote.bridge import replay
+            evidence, failures, mesh_manifest = replay(db, settings, analysis, video, original, root)
+        elif analysis.engine == "nlf":
             from spinread.product.nlf_analysis import run as run_nlf_evidence
             evidence, mesh_manifest = run_nlf_evidence(source, root / "nlf", settings,
                                                        original.content_hash, video.duration_ms)
@@ -250,6 +256,9 @@ def run_replay_analysis(db, settings, s3, job):
             analysis.error_code = failures[0] if failures else None
         analysis.updated_at = utcnow(); db.commit()
     except Exception as exc:
+        from spinread.remote.provider import RemotePending, LeaseLost
+        if isinstance(exc, (RemotePending, LeaseLost)):
+            raise
         log.exception("Supplemental analysis %s failed", analysis.id)
         db.rollback()
         analysis = db.get(ReplayAnalysis, job.payload["analysis_id"])

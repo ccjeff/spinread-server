@@ -174,6 +174,23 @@ class Job(Base):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
 
 
+class RemoteExecution(Base):
+    __tablename__ = "remote_executions"
+    __table_args__ = (UniqueConstraint("job_id", "operation"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("rex"))
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), nullable=False)
+    operation: Mapped[str] = mapped_column(Text, nullable=False)
+    request_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="PREPARED")
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    call_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_key: Mapped[str] = mapped_column(Text, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Timeline(Base):
     __tablename__ = "timelines"
     __table_args__ = (

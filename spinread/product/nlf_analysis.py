@@ -22,6 +22,12 @@ def config(settings):
 
 def status(settings, *, refresh=False):
     """No network, model download or GPU inference; never expose private paths."""
+    if settings.remote_provider == "modal":
+        enabled = "nlf" in settings.remote_replay_engines
+        return {"configured": enabled, "available": enabled,
+                "status": "REMOTE_CONFIGURED" if enabled else "UNAVAILABLE",
+                "missing": [] if enabled else ["REMOTE_NLF_NOT_ENABLED"], "no_fallback": True,
+                "provider": "modal", "verified_at_runtime": False}
     key = (settings.nlf_weights, settings.nlf_faces, settings.nlf_fps, settings.nlf_batch_size)
     cached = _status_cache.get(key)
     if not refresh and cached and time.monotonic() - cached[0] < 15:
