@@ -7,6 +7,7 @@ import logging
 
 from pingpong_training.media.probe import FFmpegError
 from pingpong_training.pipeline import analyze_video
+from spinread.pipeline.vision import vision_config, vision_fingerprint
 
 from spinread.pipeline.stage import (
     RetryableStageError,
@@ -20,7 +21,8 @@ log = logging.getLogger(__name__)
 
 class ActivityStage:
     stage = "ACTIVITY"
-    stage_version = "activity-heuristic-0.1.0"
+    stage_version = "activity-selectable-1.0.0"
+    cache_fingerprint = staticmethod(vision_fingerprint)
 
     def run(self, ctx: StageContext) -> StageResult:
         # Stable cross-run cache: pcm/gray_frames npy caches hit across runs.
@@ -30,6 +32,7 @@ class ActivityStage:
             artifact = analyze_video(
                 local,
                 work_dir=poc_work,
+                blurball_config=vision_config(ctx.settings),
                 ffmpeg_bin=ctx.settings.ffmpeg_bin,
                 ffprobe_bin=ctx.settings.ffprobe_bin,
             )

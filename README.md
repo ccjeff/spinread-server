@@ -155,3 +155,52 @@ pytest -q        # 需要 compose 栈已起;全部打真 PG+MinIO+ffmpeg
 新分析使用 `rally-racket-0.2.0`，将球拍触球候选与通用音频冲击分离。保留当前分段边界的修复命令：`.venv/bin/python -m scripts.recount_hits VIDEO_ID`（只预览）；加 `--apply --base-version N` 发布新时间线并重算指标/报告。历史保留；旧 quiz 与训练计划按时间线版本规则标为待复核。回合卡片展示估计次数，包含双方触球。边界编辑后同步重算子击球计数，平均击球数包含零候选回合。
 
 当前用户报告只交付训练指标与可靠的训练发现。检测置信度/切分诊断留在内部，旧自动诊断任务从计划视图排除。回合重切可使用 `python -m scripts.resegment_rallies VIDEO_ID` 预览，再加 `--apply --base-version N` 发布新版本；保留上层人工分段及历史，原回合子节点替换为视听联合候选。
+
+## BlurBall visual labeling
+
+Install the optional inference dependencies in the **worker's** environment:
+
+```bash
+.venv/bin/python -m pip install -e '../pingpong-training[vision]'
+```
+
+Download the checkpoint described in
+[pingpong-training's setup guide](https://github.com/ccjeff/pingpong-training/blob/codex/blurball-labeling/docs/blurball-labeling.md).
+Set these in `.env`, using an absolute local checkpoint path, and restart API/worker:
+
+```dotenv
+SPINREAD_BLURBALL_WEIGHTS=/absolute/path/to/blurball_best
+SPINREAD_BLURBALL_DEVICE=auto
+SPINREAD_BLURBALL_BATCH_SIZE=8
+```
+
+New analyses use BlurBall-supported activity/rally/hit labels; quiz candidate
+generation uses the same configured detector. An empty weight setting keeps
+legacy behavior. Invalid configured weights fail instead of silently returning
+audio-only labels. Model identity and event parameters invalidate stage caches.
+
+To relabel an existing video without another media transcode:
+
+```bash
+.venv/bin/python -m scripts.relabel_video VIDEO_ID --base-version 5
+.venv/bin/python -m scripts.relabel_video VIDEO_ID --base-version 5 --apply
+```
+
+The first command is a dry run. This reuses the original's successful PROBE,
+NORMALIZE and QUALITY artifacts, then queues ACTIVITY through REPORT through
+the normal worker. The previous timeline remains stored and active until the
+new timeline is published. Activity intervals, rally children and hit candidates
+are all rebuilt. Existing quiz approvals follow the normal timeline-version
+gate and must be reviewed against the new version.
+
+## 单个训练脉络的 AI 点评
+
+在视频详情选择一个训练脉络，点击“分析本段”。使用服务端凭据，提供后台进度、可回放证据、结构化练习建议和可选的同一球员历史同类训练对比；模型用量与采样诊断仅内部保留。部署要求、接口和验证见 [chapter-analysis.md](docs/chapter-analysis.md)，完整策略见 [SpinRead LLM strategy](<docs/SpinRead LLM strategy.md>)。
+
+## 逐拍、落点与 3D 复盘（2026-10-25）
+
+EVENTS 现在交付可追溯的球路和触球依据，并可运行本地 MediaPipe 姿态模型；前端支持同步骨架、逐拍跳转、四角标定和已确认落点的发接发统计。需要迁移 `0008_replay_reviews`。安装、接口、版本规则和能力边界见 [复盘管线](docs/evidence-replay.md)。
+
+## Pingpong3D 与接发球／教练闭环
+
+支持独立补充分析、NLF41 球台坐标骨架与拟合球路、模型落点统计、提交后的逐拍证据、版本化教练参考答案及训练任务关联。现有视频、时间线、作答、训练与复测记录保留。先安装 `requirements-analysis.txt` 固定的分析库并升级到 `0009_replay_training_bridge`；运行环境、GPU 能力边界和验证结果见 [部署说明](docs/pingpong3d-deployment.md)，接口见 [训练闭环契约](docs/replay-training-bridge.md)。

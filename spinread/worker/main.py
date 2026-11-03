@@ -22,6 +22,7 @@ from spinread.pipeline import orchestrator
 from spinread.pipeline.finalize import finalize_upload
 from spinread.pipeline.stage import execute_stage
 from spinread.pipeline.stages import REGISTRY
+from spinread.worker.heartbeat import keep_claim_alive
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,12 @@ def _handle_pipeline_stage(session: Session, settings: Settings, s3, job: Job) -
         return "done"
     if run.state != "RUNNING" or video.deleted_at is not None:
         return "done"
+
+    if session.info.get("remote_client"):
+        from spinread.remote.bridge import RemoteStage
+        from spinread.remote.protocol import COMPUTE_STAGES
+        if stage_impl.stage in COMPUTE_STAGES:
+            stage_impl = RemoteStage(stage_impl, session.info["remote_client"], job)
 
     stage_run = execute_stage(
         session, settings, s3, run, video, stage_impl, attempt=job.attempts + 1
@@ -91,10 +98,13 @@ def _handle_clip_render(session: Session, settings: Settings, s3, job: Job) -> s
     work = Path(tempfile.mkdtemp(prefix="cliprender-", dir=settings.tmp_dir))
     proxy_local = work / "proxy.mp4"
     out_local = work / "out.mp4"
-    s3.download_file(proxy.object_key, str(proxy_local))
-
     try:
-        render = render_intervals(
+        if session.info.get("remote_client"):
+            from spinread.remote.bridge import clip
+            render_data = clip(session, settings, video, proxy, manifest, job, work)
+        else:
+            s3.download_file(proxy.object_key, str(proxy_local))
+            render = render_intervals(
             proxy_local,
             intervals,
             out_local,
@@ -103,7 +113,8 @@ def _handle_clip_render(session: Session, settings: Settings, s3, job: Job) -> s
             reencode=True,
             ffmpeg_bin=settings.ffmpeg_bin,
             ffprobe_bin=settings.ffprobe_bin,
-        )
+            )
+            render_data = render.model_dump(mode="json")
     except FFmpegError as exc:
         raise RuntimeError(f"clip render failed: {exc}") from exc
 
@@ -118,18 +129,25 @@ def _handle_clip_render(session: Session, settings: Settings, s3, job: Job) -> s
         content_hash=file_sha256(str(out_local)),
         byte_size=out_local.stat().st_size,
         status="ACTIVE",
-        manifest=render.model_dump(mode="json"),
+        manifest=render_data,
     )
     session.add(asset)
     session.flush()
     manifest.asset_id = asset.id
     session.commit()
+    import shutil
+    shutil.rmtree(work, ignore_errors=True)
     return "done"
 
 
 from spinread.product.quiz_generation import generate_quiz_candidates
 
+from spinread.product.chapter_analysis import run_analysis
+from spinread.product.replay_analysis import run_replay_analysis
+
 HANDLERS = {
+    "REPLAY_ANALYSIS": run_replay_analysis,
+    "CHAPTER_ANALYSIS": run_analysis,
     "QUIZ_GENERATE": generate_quiz_candidates,
     "PIPELINE_STAGE": _handle_pipeline_stage,
     "FINALIZE_UPLOAD": _handle_finalize_upload,
@@ -161,7 +179,8 @@ def run_worker(settings: Settings | None = None, *, once: bool = False, worker_i
             try:
                 if handler is None:
                     raise ValueError(f"no handler for job kind {job.kind}")
-                outcome = handler(session, settings, s3, job)
+                with keep_claim_alive(factory, job.id, worker_id):
+                    outcome = handler(session, settings, s3, job)
                 if outcome == "retry":
                     queue.fail(session, job.id, "stage reported retryable failure", retryable=True)
                 else:

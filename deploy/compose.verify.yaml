@@ -1,0 +1,26 @@
+# Disposable isolated stack. No host ports, bind mounts, user data or credentials.
+services:
+  pg:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: verify
+      POSTGRES_PASSWORD: local-test-only
+      POSTGRES_DB: rallyloop_verify
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U verify -d rallyloop_verify"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  verify:
+    image: rallyloop-local:verify-20261101
+    platform: linux/amd64
+    mem_limit: 1g
+    environment:
+      RALLYLOOP_TEST_DB_URL: postgresql+psycopg://verify:local-test-only@pg:5432/rallyloop_verify
+      SPINREAD_DB_URL: postgresql+psycopg://verify:local-test-only@pg:5432/rallyloop_verify
+      SPINREAD_RUNTIME_ENVIRONMENT: local
+    depends_on:
+      pg:
+        condition: service_healthy

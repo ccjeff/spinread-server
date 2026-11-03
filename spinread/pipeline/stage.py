@@ -142,12 +142,23 @@ def gather_prior_artifacts(
 
 
 def _gather_inputs(
-    session: Session, pipeline_run_id: str, video: Video
+    session: Session, pipeline_run_id: str, video: Video, stage: str
 ) -> tuple[list[str], list[str], dict[str, Artifact]]:
     """(input_content_hashes, input_artifact_or_asset_ids, prior_artifacts)."""
     from spinread.core.models import MediaAsset
 
     prior = gather_prior_artifacts(session, pipeline_run_id)
+    from spinread.pipeline.dag import STAGES
+    ancestors = set()
+    def visit(name):
+        for dependency in STAGES.get(name, []):
+            if dependency not in ancestors:
+                ancestors.add(dependency)
+                visit(dependency)
+    visit(stage)
+    # A completed stage's own output (or a later stage's output) must not
+    # change its inputs when a queue acknowledgement is retried after a crash.
+    prior = {name: artifact for name, artifact in prior.items() if name in ancestors}
     input_hashes: list[str] = []
     input_ids: list[str] = []
     original = session.scalar(
@@ -182,8 +193,11 @@ def execute_stage(
     the caller inspects stage_run.status to decide job retry. Unexpected
     exceptions propagate (the caller rolls back and retries the job).
     """
-    input_hashes, input_ids, prior = _gather_inputs(session, pipeline_run.id, video)
+    input_hashes, input_ids, prior = _gather_inputs(session, pipeline_run.id, video, stage_impl.stage)
 
+    fingerprint = getattr(stage_impl, "cache_fingerprint", None)
+    if fingerprint is not None:
+        input_hashes.append(fingerprint(settings))
     idem_key = compute_idempotency_key(
         video.id, stage_impl.stage, stage_impl.stage_version, input_hashes
     )
@@ -193,28 +207,12 @@ def execute_stage(
             StageRun.pipeline_run_id == pipeline_run.id,
             StageRun.stage == stage_impl.stage,
             StageRun.idempotency_key == idem_key,
-            StageRun.status.in_(["SUCCEEDED", "PARTIAL_SUCCESS", "SKIPPED_UNSUPPORTED"]),
         )
     )
-    if existing is not None:
-        cached = StageRun(
-            pipeline_run_id=pipeline_run.id,
-            stage=stage_impl.stage,
-            stage_version=stage_impl.stage_version,
-            idempotency_key=idem_key,
-            status="REUSED_CACHE",
-            attempt=existing.attempt,
-            input_artifact_ids=input_ids,
-            output_artifact_id=existing.output_artifact_id,
-            started_at=utcnow(),
-            finished_at=utcnow(),
-            metrics=existing.metrics,
-        )
-        session.add(cached)
-        session.flush()
-        return cached
+    if existing is not None and existing.status in {"SUCCEEDED", "PARTIAL_SUCCESS", "SKIPPED_UNSUPPORTED", "REUSED_CACHE"}:
+        return existing
 
-    stage_run = StageRun(
+    stage_run = existing or StageRun(
         pipeline_run_id=pipeline_run.id,
         stage=stage_impl.stage,
         stage_version=stage_impl.stage_version,
@@ -224,6 +222,10 @@ def execute_stage(
         input_artifact_ids=input_ids,
         started_at=utcnow(),
     )
+    stage_run.status = "RUNNING"
+    stage_run.attempt = attempt
+    stage_run.error_code = stage_run.error_message = None
+    stage_run.finished_at = None
     session.add(stage_run)
     session.flush()
 
